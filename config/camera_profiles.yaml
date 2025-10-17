@@ -1,0 +1,25 @@
+profiles:
+  cam0:
+    description: Left camera (CSI port 0)
+    resolution: [1536, 864]
+    rotation: 0
+    hflip: false
+    vflip: true
+    crop: [1536, 864]
+  cam1:
+    description: Right camera (CSI port 1)
+    resolution: [1536, 864]
+    rotation: 0
+    hflip: true
+    vflip: true
+    crop: [1536, 864]
+
+calibration:
+  chessboard:
+    columns: 9
+    rows: 6
+    square_size_m: 0.024
+  output_dir: data/calibration
+  notes: |
+    Capture at least 30 well-lit views per camera covering the full FOV.
+    Use `scripts/capture_calibration.py` with matching board settings above.
