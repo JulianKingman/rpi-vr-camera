@@ -11,7 +11,7 @@ fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 pip install --upgrade pip wheel
-pip install aiortc opencv-python numpy picamera2 pyyaml PySide6
+pip install aiortc aiohttp opencv-python numpy picamera2 pyyaml PySide6
 
 "$PYTHON" - <<'PY'
 from pathlib import Path

@@ -36,7 +36,7 @@ sudo apt install -y \
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip wheel
-pip install aiortc opencv-python numpy picamera2 pyyaml PySide6
+pip install aiortc aiohttp opencv-python numpy picamera2 pyyaml PySide6
 ```
 
 - The `make python-deps` helper writes the `.pth` link automatically; if you ever recreate the venv manually, run `echo '/usr/lib/python3/dist-packages' >> .venv/lib/python3.*/site-packages/rpi_libcamera.pth`.
@@ -57,6 +57,8 @@ make capture-right       # writes capture-output/right/<timestamp>/right.h264 (+
 make capture-stereo      # launches left/right in parallel with shared timestamp label
 make calibration-ui      # live Qt alignment UI for tweaking rotation/crop/offsets
 make stream-preview      # real-time side-by-side preview using calibration settings
+make stream-cast ARGS="--endpoint udp://127.0.0.1:5000"  # preview + network stream
+make stream-webrtc ARGS="--host 0.0.0.0 --port 8443"  # WebRTC/WebXR server (browse to /)
 OUT_ROOT=test-output make capture-left  # store captures under test-output/...
 ```
 
@@ -66,10 +68,24 @@ OUT_ROOT=test-output make capture-left  # store captures under test-output/...
 - Default `TIMEOUT=5000` yields a 5 s clip; try `TIMEOUT=30000 make capture-left` for half a minute, or `TIMEOUT=0 KEYPRESS=1` to keep recording until Enter.
 - Add `PREVIEW=drm` to the preview target when running on a Wayland desktop to see the live feed.
 - Run `make stream-preview` for a live side-by-side window honouring the current calibration; use `--headless` if no GUI is available.
+- Run `make stream-cast ARGS="--endpoint udp://host:port"` to preview locally while ffmpeg multicasts the combined feed.
+- Run `make stream-webrtc ARGS="--host 0.0.0.0 --port 8443"` and open `https://<pi-ip>:8443/` in a WebRTC-capable browser (Quest, desktop) to view the stream.
 - Run `make calibration-ui` for a live Qt preview where you can tweak rotation, flips, crops, and offsets (writes back to `config/camera_profiles.yaml`).
 - Captures land under `capture-output/<left|right>/<YYYYMMDD_HHMMSS>` with raw `.h264`, matching `.mp4`, and `.pts`; override the base folder via `OUT_ROOT=...`.
 
 ## Calibration UI (Qt)
+## WebRTC/WebXR Streaming
+Spin up the WebRTC server and open the bundled client in a browser or headset:
+
+```bash
+make stream-webrtc ARGS="--host 0.0.0.0 --port 8443"
+```
+
+- Browse to `https://<pi-ip>:8443/` and click **Start Stream**. The client uses WebRTC to negotiate a connection and renders the side-by-side feed.
+- For Oculus Quest, HTTPS is required (self-signed certs will prompt a warning). You can terminate TLS via a reverse proxy (nginx/Caddy) or adjust the script to use `--host 0.0.0.0 --port 8080` with HTTP while testing in Chrome flags.
+- The HTML client lives in `web/index.html`; extend it with WebXR APIs to map each half of the frame to the appropriate eye.
+- Shut down with `Ctrl+C`; the server closes active peer connections and releases both cameras.
+
 Launch the desktop calibration tool to visualise both camera streams side by side and interactively tweak their transforms:
 
 ```bash
@@ -79,6 +95,7 @@ make calibration-ui
 - Rotation, horizontal/vertical flips, crop size, and XY offsets update the preview immediately.
 - Press **Save Calibration** to write the values back into `config/camera_profiles.yaml`; subsequent scripts (capture, streaming) will pick up the new defaults.
 - Close the window to release both cameras before running other capture commands.
+- After saving, try `make stream-preview` or `make stream-cast` to confirm stereo alignment in real time.
 
 ## Prototype 120 FPS Capture
 Aim for the 1536×864@120 mode first to validate dual-camera throughput.
@@ -112,6 +129,7 @@ rpicam-vid --camera 1 --framerate 120 --width 1536 --height 864 \
    - Use `scripts/list_cameras.py` (or `make preview CAMERA=0 METADATA=1 PREVIEW=null`) to inspect per-sensor modes and controls.
    - `make preview CAMERA=0 METADATA=1` (and `CAMERA=1`) starts a 1536×864@120 preview with optional rotation, crop, and live metadata output for debugging.
    - `make stream-preview` (Picamera2) shows both calibrated feeds in real time for quick stereo verification.
+   - `make stream-cast ARGS="--endpoint udp://host:port"` mirrors the preview while ffmpeg multicasts the combined feed.
    - `make capture-stereo` records both sensors in parallel, storing synchronized outputs under a shared timestamp label.
    - Next: extend preview into a dual-feed capture node that pipes synchronized frames into shared queues while logging exposure/gain/frame time.
 2. **Orientation, crop, and calibration**
@@ -129,9 +147,9 @@ rpicam-vid --camera 1 --framerate 120 --width 1536 --height 864 \
    - Evaluate `OpenCV CUDA` vs `Vulkan` vs shader-based pipeline for Pi 5 VideoCore VII.
    - Output VR-ready frame packing standard (initially side-by-side 1:1, expand to OpenXR-compliant format).
 5. **WebRTC transport**
-   - Use `GStreamer webrtcbin` or `aiortc` with hardware encode (H.265/AVC via `v4l2h264enc`/`v4l2hevcenc`) with a clear <15 ms glass-to-glass target (150 ms is too high and triggers discomfort).
-   - Implement signaling server (simple WebSocket) and browser-based VR viewer (WebXR) or native OpenXR client.
-   - Add adaptive bitrate / dynamic framerate controls.
+   - Current prototype: `make stream-webrtc` (aiortc + WebRTC) serves `web/index.html` so any WebRTC-capable browser can subscribe to the combined feed.
+   - Next: integrate OpenXR/WebXR-specific rendering (split textures per eye, apply headset-specific transforms, handle controller input).
+   - Longer term: add adaptive bitrate / dynamic framerate controls and migrate the encode path to the Pi hardware encoder pipeline.
 6. **Performance tuning & validation**
    - Target <11 ms pipeline latency at 90 Hz; profile CPU/GPU usage (perf, `libcamera-vid --save-pts`).
    - Stress-test thermal limits; enable fan curve.

@@ -24,7 +24,7 @@ CAPTURE_TIMEOUT := --timeout $(TIMEOUT)
 CAPTURE_KEYPRESS := $(if $(filter 0,$(KEYPRESS)),,--keypress)
 SETPTS_EXPR := N/($(FRAMERATE)*TB)
 
-.PHONY: help system-deps python-deps preview capture capture-left capture-right convert convert-left convert-right capture-stereo calibration-ui stream-preview
+.PHONY: help system-deps python-deps preview capture capture-left capture-right convert convert-left convert-right capture-stereo calibration-ui stream-preview stream-cast stream-webrtc
 
 help:
 	@echo "Available targets:"
@@ -34,6 +34,8 @@ help:
 	@echo "  make capture          # capture from camera (5s default; tweak TIMEOUT/KEYPRESS)"
 	@echo "  make calibration-ui   # launch Qt calibration interface"
 	@echo "  make stream-preview   # live side-by-side stereo preview (Picamera2)"
+	@echo "  make stream-cast      # preview + network cast via ffmpeg"
+	@echo "  make stream-webrtc    # launch WebRTC/WebXR server (requires browser client)"
 	@echo "Variables: CAMERA, RESOLUTION, PREVIEW, METADATA, FRAMERATE, WIDTH, HEIGHT, OUTPUT, PTS"
 
 system-deps:
@@ -133,3 +135,17 @@ stream-preview:
 		exit 1; \
 	fi
 	. .venv/bin/activate && python scripts/stream_stereo.py
+
+stream-cast:
+	@if [ ! -x .venv/bin/python3 ]; then \
+		echo "Virtualenv missing. Run 'make python-deps' first."; \
+		exit 1; \
+	fi
+	. .venv/bin/activate && python scripts/stream_cast.py $(ARGS)
+
+stream-webrtc:
+	@if [ ! -x .venv/bin/python3 ]; then \
+		echo "Virtualenv missing. Run 'make python-deps' first."; \
+		exit 1; \
+	fi
+	. .venv/bin/activate && python scripts/webrtc_stream.py $(ARGS)

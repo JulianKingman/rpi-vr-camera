@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>rpi-vr-camera WebXR/WebRTC Preview</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        font-family: Arial, sans-serif;
+        background: #111;
+        color: #eee;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+      }
+      header {
+        padding: 16px;
+        text-align: center;
+      }
+      video {
+        max-width: 90vw;
+        background: #000;
+      }
+      .controls {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+      }
+      button {
+        padding: 10px 16px;
+        background: #1e88e5;
+        border: none;
+        color: #fff;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      button:disabled {
+        background: #555;
+        cursor: not-allowed;
+      }
+      pre {
+        max-width: 90vw;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>rpi-vr-camera WebRTC Preview</h1>
+      <p>
+        This page negotiates a WebRTC connection with the Raspberry Pi and
+        displays the side-by-side stereo feed. For Oculus Quest, open this page
+        via <code>https://&lt;pi-ip&gt;:8080</code> (you may need to accept a
+        self-signed certificate or enable insecure origins).
+      </p>
+    </header>
+    <div class="controls">
+      <button id="startButton">Start Stream</button>
+      <button id="stopButton" disabled>Stop</button>
+    </div>
+    <video id="video" playsinline autoplay muted></video>
+    <pre id="status"></pre>
+
+    <script>
+      const startButton = document.getElementById("startButton");
+      const stopButton = document.getElementById("stopButton");
+      const video = document.getElementById("video");
+      const statusEl = document.getElementById("status");
+
+      let pc = null;
+
+      function log(message) {
+        statusEl.textContent = message;
+      }
+
+      async function startStream() {
+        startButton.disabled = true;
+        stopButton.disabled = false;
+        log("Starting WebRTC negotiation…");
+
+        pc = new RTCPeerConnection({
+          iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }],
+        });
+
+        pc.addEventListener("track", (event) => {
+          video.srcObject = event.streams[0];
+        });
+
+        pc.addEventListener("connectionstatechange", () => {
+          log(`Peer connection state: ${pc.connectionState}`);
+          if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+            stopStream(`Connection ${pc.connectionState}`);
+          }
+        });
+
+        pc.addTransceiver("video", { direction: "recvonly" });
+        pc.addTransceiver("audio", { direction: "recvonly" });
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        const fail = async (message) => {
+          await stopStream(message);
+        };
+
+        let response;
+        try {
+          response = await fetch("/offer", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(pc.localDescription),
+          });
+        } catch (err) {
+          await fail(`Offer network error: ${err}`);
+          return;
+        }
+
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const message = payload.error || response.statusText;
+          await fail(`Offer failed: ${message}`);
+          return;
+        }
+
+        await pc.setRemoteDescription(payload);
+        log("WebRTC connection established.");
+      }
+
+      async function stopStream(message) {
+        stopButton.disabled = true;
+        startButton.disabled = false;
+        if (pc) {
+          pc.getSenders().forEach((sender) => sender.track && sender.track.stop());
+          await pc.close();
+          pc = null;
+        }
+        video.srcObject = null;
+        log(message || "Stream stopped.");
+      }
+
+      startButton.addEventListener("click", startStream);
+      stopButton.addEventListener("click", () => stopStream());
+    </script>
+  </body>
+</html>
