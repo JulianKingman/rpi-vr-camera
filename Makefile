@@ -24,7 +24,7 @@ CAPTURE_TIMEOUT := --timeout $(TIMEOUT)
 CAPTURE_KEYPRESS := $(if $(filter 0,$(KEYPRESS)),,--keypress)
 SETPTS_EXPR := N/($(FRAMERATE)*TB)
 
-.PHONY: help system-deps python-deps preview capture capture-left capture-right convert convert-left convert-right
+.PHONY: help system-deps python-deps preview capture capture-left capture-right convert convert-left convert-right capture-stereo calibration-ui stream-preview
 
 help:
 	@echo "Available targets:"
@@ -32,6 +32,8 @@ help:
 	@echo "  make python-deps      # create/update Python venv"
 	@echo "  make preview          # preview camera feed"
 	@echo "  make capture          # capture from camera (5s default; tweak TIMEOUT/KEYPRESS)"
+	@echo "  make calibration-ui   # launch Qt calibration interface"
+	@echo "  make stream-preview   # live side-by-side stereo preview (Picamera2)"
 	@echo "Variables: CAMERA, RESOLUTION, PREVIEW, METADATA, FRAMERATE, WIDTH, HEIGHT, OUTPUT, PTS"
 
 system-deps:
@@ -117,3 +119,17 @@ convert-right:
 	target="$$latest/right.mp4"; \
 	$(MAKE) convert SOURCE="$$src" TARGET="$$target"; \
 	echo "Wrote $$target"
+
+calibration-ui:
+	@if [ ! -x .venv/bin/python3 ]; then \
+		echo "Virtualenv missing. Run 'make python-deps' first."; \
+		exit 1; \
+	fi
+	. .venv/bin/activate && python scripts/calibration_gui.py
+
+stream-preview:
+	@if [ ! -x .venv/bin/python3 ]; then \
+		echo "Virtualenv missing. Run 'make python-deps' first."; \
+		exit 1; \
+	fi
+	. .venv/bin/activate && python scripts/stream_stereo.py
