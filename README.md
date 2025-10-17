@@ -69,7 +69,7 @@ OUT_ROOT=test-output make capture-left  # store captures under test-output/...
 - Add `PREVIEW=drm` to the preview target when running on a Wayland desktop to see the live feed.
 - Run `make stream-preview` for a live side-by-side window honouring the current calibration; use `--headless` if no GUI is available.
 - Run `make stream-cast ARGS="--endpoint udp://host:port"` to preview locally while ffmpeg multicasts the combined feed.
-- Run `make stream-webrtc ARGS="--host 0.0.0.0 --port 8443"` and open `https://<pi-ip>:8443/` in a WebRTC-capable browser (Quest, desktop) to view the stream.
+- Run `make stream-webrtc ARGS="--host 0.0.0.0 --port 8443"` and open `https://<pi-ip>:8443/` in a WebRTC-capable browser (Quest, desktop) to view the stream. Once connected, hit **Enter VR** to split the feed per eye inside the headset.
 - Run `make calibration-ui` for a live Qt preview where you can tweak rotation, flips, crops, and offsets (writes back to `config/camera_profiles.yaml`).
 - Captures land under `capture-output/<left|right>/<YYYYMMDD_HHMMSS>` with raw `.h264`, matching `.mp4`, and `.pts`; override the base folder via `OUT_ROOT=...`.
 
@@ -81,9 +81,9 @@ Spin up the WebRTC server and open the bundled client in a browser or headset:
 make stream-webrtc ARGS="--host 0.0.0.0 --port 8443"
 ```
 
-- Browse to `https://<pi-ip>:8443/` and click **Start Stream**. The client uses WebRTC to negotiate a connection and renders the side-by-side feed.
+- Browse to `https://<pi-ip>:8443/`, click **Start Stream**, and once connected use **Enter VR** to send the left/right halves to each eye.
 - For Oculus Quest, HTTPS is required (self-signed certs will prompt a warning). You can terminate TLS via a reverse proxy (nginx/Caddy) or adjust the script to use `--host 0.0.0.0 --port 8080` with HTTP while testing in Chrome flags.
-- The HTML client lives in `web/index.html`; extend it with WebXR APIs to map each half of the frame to the appropriate eye.
+- The HTML client lives in `web/index.html`; customise it to add headset-specific overlays or controller input handling.
 - Shut down with `Ctrl+C`; the server closes active peer connections and releases both cameras.
 
 Launch the desktop calibration tool to visualise both camera streams side by side and interactively tweak their transforms:

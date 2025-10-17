@@ -225,9 +225,12 @@ class WebRTCServer:
             video_transceiver.sender.replaceTrack(video_track)
 
         audio_transceiver = next((t for t in pc.getTransceivers() if t.kind == "audio"), None)
-        if audio_transceiver and audio_transceiver.sender:
-            audio_transceiver.direction = "sendonly"
-            audio_transceiver.sender.replaceTrack(audio_track)
+        if audio_transceiver:
+            if audio_transceiver.sender:
+                audio_transceiver.direction = "sendonly"
+                audio_transceiver.sender.replaceTrack(audio_track)
+            else:
+                pc.addTrack(audio_track)
 
         try:
             answer = await pc.createAnswer()
