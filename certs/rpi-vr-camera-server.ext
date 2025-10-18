@@ -1,0 +1,4 @@
+subjectAltName = @alt_names
+[alt_names]
+DNS.1 = rpi-vr-camera
+DNS.2 = rpi-vr-camera.local

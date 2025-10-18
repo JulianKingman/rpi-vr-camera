@@ -4,8 +4,8 @@ profiles:
     resolution:
     - 2304
     - 1296
-    rotation: 90
-    hflip: false
+    rotation: 270
+    hflip: true
     vflip: false
     crop:
     - 1000
@@ -22,8 +22,8 @@ profiles:
     resolution:
     - 2304
     - 1296
-    rotation: 270
-    hflip: true
+    rotation: 90
+    hflip: false
     vflip: false
     crop:
     - 1000

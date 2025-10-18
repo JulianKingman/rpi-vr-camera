@@ -41,6 +41,9 @@
         background: #555;
         cursor: not-allowed;
       }
+      a {
+        color: #90caf9;
+      }
       pre {
         max-width: 90vw;
         white-space: pre-wrap;
@@ -53,10 +56,14 @@
       <p>
         This page negotiates a WebRTC connection with the Raspberry Pi and
         displays the side-by-side stereo feed. For Oculus Quest, open this page
-        via <code>https://&lt;pi-ip&gt;:8080</code> (you may need to accept a
-        self-signed certificate or enable insecure origins).
+        via <code>https://&lt;pi-ip&gt;:8443</code>. Install the provided CA
+        certificate first so the headset trusts the stream.
       </p>
     </header>
+    <p id="caSection" style="display:none;">
+      <a id="caLink" href="/ca.crt" download>Download CA certificate</a>
+      (import under <strong>Settings → Security → Install certificates</strong>)
+    </p>
     <div class="controls">
       <button id="startButton">Start Stream</button>
       <button id="stopButton" disabled>Stop</button>
@@ -73,6 +80,17 @@
       const video = document.getElementById("video");
       const statusEl = document.getElementById("status");
       const xrCanvas = document.getElementById("xrCanvas");
+      const caSection = document.getElementById("caSection");
+
+      if (caSection) {
+        fetch("/ca.crt", { method: "HEAD" })
+          .then((resp) => {
+            if (resp.ok) {
+              caSection.style.display = "block";
+            }
+          })
+          .catch(() => {});
+      }
 
       const hasWebXR = !!navigator.xr;
 

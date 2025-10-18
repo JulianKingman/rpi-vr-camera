@@ -24,7 +24,7 @@ CAPTURE_TIMEOUT := --timeout $(TIMEOUT)
 CAPTURE_KEYPRESS := $(if $(filter 0,$(KEYPRESS)),,--keypress)
 SETPTS_EXPR := N/($(FRAMERATE)*TB)
 
-.PHONY: help system-deps python-deps preview capture capture-left capture-right convert convert-left convert-right capture-stereo calibration-ui stream-preview stream-cast stream-webrtc
+.PHONY: help system-deps python-deps preview capture capture-left capture-right convert convert-left convert-right capture-stereo calibration-ui stream-preview stream-cast stream-webrtc tls-certs
 
 help:
 	@echo "Available targets:"
@@ -36,6 +36,7 @@ help:
 	@echo "  make stream-preview   # live side-by-side stereo preview (Picamera2)"
 	@echo "  make stream-cast      # preview + network cast via ffmpeg"
 	@echo "  make stream-webrtc    # launch WebRTC/WebXR server (requires browser client)"
+	@echo "  make tls-certs        # interactive helper for HTTPS certificates"
 	@echo "Variables: CAMERA, RESOLUTION, PREVIEW, METADATA, FRAMERATE, WIDTH, HEIGHT, OUTPUT, PTS"
 
 system-deps:
@@ -149,3 +150,6 @@ stream-webrtc:
 		exit 1; \
 	fi
 	. .venv/bin/activate && python scripts/webrtc_stream.py $(ARGS)
+
+tls-certs:
+	$(PYTHON) scripts/generate_tls_certs.py

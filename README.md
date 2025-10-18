@@ -76,7 +76,7 @@ OUT_ROOT=test-output make capture-left  # store captures under test-output/...
 ## Operational Notes
 - **Latency instrumentation** – Add a monotonic `sent_at` timestamp to the WebRTC data channel and render a small HUD in the WebXR client so you can read end-to-end latency and fps directly inside the Quest once the proxy is removed.
 - **Latency tuning ideas** – Prefer a hard link (Quest Link/Air Link via Ethernet PC or USB-C tether) or a dedicated Wi-Fi 6 AP near the Pi; if you stay on Wi-Fi, lock to 5 GHz, disable power save with `iw wlan0 set power_save off`, and use low-latency encoder settings (H.264 baseline, IDR every frame, shallow queues).
-- **SSL without ngrok** – Follow the flow outlined in [this Node-RED forum thread](https://discourse.nodered.org/t/setup-of-https-ssl-local-webxr-quest-development/96224) to self-host HTTPS: create a local CA/self-signed cert, install it on the Quest, and point `make stream-webrtc` at the resulting key/cert pair.
+- **SSL without ngrok** – Follow the flow outlined in [this Node-RED forum thread](https://discourse.nodered.org/t/setup-of-https-ssl-local-webxr-quest-development/96224) (mirrored below) to self-host HTTPS: mint a local CA, trust it on the Quest, then run `make stream-webrtc ARGS="... --cert certs/dev-server.crt --key certs/dev-server.key"` so WebRTC can stay entirely on your LAN.
 - **Color & white balance** – The calibration UI now includes an auto white balance toggle, AWB mode selector (try `incandescent`/`tungsten` for warmer scenes), and manual red/blue gains; capture a gray card to lock gains, then revisit LUT/CCM adjustments if a blue shift remains.
 - **Printing this guide** – Use `lp README.md` (or `lp -o landscape README.md`) to send the file to the default printer, or generate a PDF first via `pandoc README.md -o rpi-vr-camera.pdf` and print that artifact.
 
@@ -92,6 +92,49 @@ make stream-webrtc ARGS="--host 0.0.0.0 --port 8443"
 - For Oculus Quest, HTTPS is required (self-signed certs will prompt a warning). You can terminate TLS via a reverse proxy (nginx/Caddy) or adjust the script to use `--host 0.0.0.0 --port 8080` with HTTP while testing in Chrome flags.
 - The HTML client lives in `web/index.html`; customise it to add headset-specific overlays or controller input handling.
 - Shut down with `Ctrl+C`; the server closes active peer connections and releases both cameras.
+
+### Local HTTPS setup (self-hosted TLS)
+Run the WebRTC server with your own certificate to avoid tunnelling through ngrok:
+
+1. Generate the certificates interactively:
+   ```bash
+   make tls-certs
+   ```
+   The helper asks for the hostname, optional `.local`/extra SAN entries, and writes everything under the chosen directory (default `certs/`). It prints the exact `make stream-webrtc` command to run afterward.
+2. Copy the reported `*-ca.crt` file to the Quest (USB cable or cloud sync) and install it as a trusted credential (Settings → Security → Install certificates → CA certificate). Reboot the headset so WebXR can trust the issuer.
+3. Launch the streamer with HTTPS enabled using the command emitted by the helper (for example):
+   ```bash
+   make stream-webrtc ARGS="--host 0.0.0.0 --port 8443 --cert certs/rpi-vr-camera-server.crt --key certs/rpi-vr-camera-server.key --ca-cert certs/dev-ca.crt"
+   ```
+   The server now exposes `https://HOSTNAME:8443/` using your self-signed chain and publishes the CA certificate at `https://HOSTNAME:8443/ca.crt` for easy download. Devices that trust the CA will connect without TLS warnings.
+
+If you prefer to run `openssl` yourself, the helper essentially automates the following sequence (shown here for reference):
+
+```bash
+mkdir -p certs
+
+# Local CA (stored on the Quest)
+openssl req -x509 -nodes -newkey rsa:4096 \
+  -keyout certs/dev-ca.key -out certs/dev-ca.crt \
+  -days 3650 -subj "/CN=VR Dev CA"
+
+# Server key/csr (replace HOSTNAME/IP entries to match your setup)
+openssl req -new -nodes -newkey rsa:2048 \
+  -keyout certs/dev-server.key -out certs/dev-server.csr \
+  -subj "/CN=HOSTNAME"
+
+cat > certs/server.ext <<'EOF'
+subjectAltName = @alt_names
+[alt_names]
+DNS.1 = HOSTNAME
+DNS.2 = HOSTNAME.local
+IP.1 = 192.168.1.50
+EOF
+
+openssl x509 -req -in certs/dev-server.csr \
+  -CA certs/dev-ca.crt -CAkey certs/dev-ca.key -CAcreateserial \
+  -out certs/dev-server.crt -days 825 -sha256 -extfile certs/server.ext
+```
 
 Launch the desktop calibration tool to visualise both camera streams side by side and interactively tweak their transforms:
 

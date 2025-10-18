@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import json
 import signal
+import ssl
 import sys
 import time
 from dataclasses import dataclass
@@ -200,8 +201,9 @@ class SilenceAudioTrack(AudioStreamTrack):
 
 
 class WebRTCServer:
-    def __init__(self, capture: StereoCapture):
+    def __init__(self, capture: StereoCapture, ca_cert: Path | None = None):
         self.capture = capture
+        self.ca_cert = ca_cert
         self.pcs: set[RTCPeerConnection] = set()
 
     async def index(self, request: web.Request) -> web.Response:
@@ -271,11 +273,19 @@ class WebRTCServer:
         await asyncio.gather(*coros, return_exceptions=True)
         self.pcs.clear()
 
+    async def serve_ca_certificate(self, _request: web.Request) -> web.StreamResponse:
+        if not self.ca_cert or not self.ca_cert.exists():
+            return web.Response(status=404, text="CA certificate not configured.")
+        response = web.FileResponse(self.ca_cert)
+        response.headers["Content-Disposition"] = f'attachment; filename=\"{self.ca_cert.name}\"'
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="0.0.0.0", help="Host/IP to bind (use 0.0.0.0 for all interfaces)")
-    parser.add_argument("--port", type=int, default=8080, help="HTTP/WebSocket port for signaling")
+    parser.add_argument("--port", type=int, default=8443, help="HTTP/WebSocket port for signaling")
     parser.add_argument("--config", type=Path, default=CONFIG_PATH, help="Path to calibration profiles")
     parser.add_argument("--framerate", type=int, default=56, help="Capture framerate for both cameras")
     parser.add_argument(
@@ -284,11 +294,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=["stun:stun.l.google.com:19302"],
         help="ICE servers (pass as stun:host:port or turn:user@pass:host:port)",
     )
+    parser.add_argument(
+        "--cert",
+        type=Path,
+        help="Path to TLS certificate (PEM) for HTTPS/WebRTC (requires --key)",
+    )
+    parser.add_argument(
+        "--key",
+        type=Path,
+        help="Path to TLS private key (PEM) for HTTPS/WebRTC (requires --cert)",
+    )
+    parser.add_argument(
+        "--cert-pass",
+        default=None,
+        help="Optional password for the TLS private key",
+    )
+    parser.add_argument(
+        "--ca-cert",
+        type=Path,
+        help="Path to CA certificate (PEM) to expose for download at /ca.crt",
+    )
     return parser
 
 
 def main() -> None:
     args = build_arg_parser().parse_args()
+
+    ca_cert_path: Path | None = None
+    if args.ca_cert:
+        ca_cert_path = args.ca_cert.expanduser()
+        if not ca_cert_path.exists():
+            print(f"[ERROR] CA certificate not found: {ca_cert_path}", file=sys.stderr)
+            sys.exit(1)
 
     try:
         capture = StereoCapture(args.config, args.framerate)
@@ -296,12 +333,14 @@ def main() -> None:
         print(f"[ERROR] Unable to start capture: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    server = WebRTCServer(capture)
+    server = WebRTCServer(capture, ca_cert_path)
     app = web.Application()
     app["rtc_server"] = server
     app.router.add_get("/", server.index)
     app.router.add_post("/offer", server.offer)
     app.router.add_static("/static/", STATIC_DIR, show_index=True)
+    if ca_cert_path:
+        app.router.add_get("/ca.crt", server.serve_ca_certificate)
 
     semaphore = asyncio.Semaphore()
 
@@ -322,7 +361,31 @@ def main() -> None:
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, handle_signal)
 
-    web.run_app(app, host=args.host, port=args.port)
+    ssl_context = None
+    if args.cert or args.key:
+        if not (args.cert and args.key):
+            print("[ERROR] --cert and --key must be provided together for HTTPS", file=sys.stderr)
+            sys.exit(1)
+        cert_path = args.cert.expanduser()
+        key_path = args.key.expanduser()
+        if not cert_path.exists():
+            print(f"[ERROR] TLS certificate not found: {cert_path}", file=sys.stderr)
+            sys.exit(1)
+        if not key_path.exists():
+            print(f"[ERROR] TLS private key not found: {key_path}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ssl_context.load_cert_chain(
+                certfile=str(cert_path),
+                keyfile=str(key_path),
+                password=args.cert_pass,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[ERROR] Failed to load TLS certificate/key: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    web.run_app(app, host=args.host, port=args.port, ssl_context=ssl_context)
 
 
 if __name__ == "__main__":
