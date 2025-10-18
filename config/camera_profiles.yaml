@@ -2,14 +2,14 @@ profiles:
   cam0:
     description: Left camera (CSI port 0)
     resolution:
-    - 4608
-    - 2592
+    - 2304
+    - 1296
     rotation: 270
     hflip: true
     vflip: false
     crop:
     - 2048
-    - 2048
+    - 1296
     offset_x: 0
     offset_y: 0
     awb_enable: true
@@ -20,14 +20,14 @@ profiles:
   cam1:
     description: Right camera (CSI port 1)
     resolution:
-    - 4608
-    - 2592
+    - 2304
+    - 1296
     rotation: 90
     hflip: false
     vflip: false
     crop:
     - 2048
-    - 2048
+    - 1296
     offset_x: 0
     offset_y: 0
     awb_enable: true
