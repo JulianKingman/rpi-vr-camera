@@ -70,6 +70,7 @@ OUT_ROOT=test-output make capture-left  # store captures under test-output/...
 - Run `make stream-preview` for a live side-by-side window honouring the current calibration; use `--headless` if no GUI is available.
 - Run `make stream-cast ARGS="--endpoint udp://host:port"` to preview locally while ffmpeg multicasts the combined feed.
 - Run `make stream-webrtc ARGS="--host 0.0.0.0 --port 8443"` and open `https://<pi-ip>:8443/` in a WebRTC-capable browser (Quest, desktop) to view the stream. Once connected, hit **Enter VR** to split the feed per eye inside the headset.
+- Pass `--resolution WIDTHxHEIGHT` (for example, `--resolution 4056x3040`) inside `ARGS` to exercise other sensor modes without editing the config file. The override applies to both cameras for the current run.
 - Run `make calibration-ui` for a live Qt preview where you can tweak rotation, flips, crops, and offsets (writes back to `config/camera_profiles.yaml`).
 - Captures land under `capture-output/<left|right>/<YYYYMMDD_HHMMSS>` with raw `.h264`, matching `.mp4`, and `.pts`; override the base folder via `OUT_ROOT=...`.
 
@@ -142,7 +143,7 @@ Launch the desktop calibration tool to visualise both camera streams side by sid
 make calibration-ui
 ```
 
-- Rotation, horizontal/vertical flips, crop size, XY offsets, and white balance controls update the preview immediately.
+- Rotation, horizontal/vertical flips, sensor resolution, crop size, XY offsets, and white balance controls update the preview immediately.
 - Press **Save Calibration** to write the values back into `config/camera_profiles.yaml`; subsequent scripts (capture, streaming) will pick up the new defaults.
 - Close the window to release both cameras before running other capture commands.
 - After saving, try `make stream-preview` or `make stream-cast` to confirm stereo alignment in real time.

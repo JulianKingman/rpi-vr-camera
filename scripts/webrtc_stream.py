@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock, Thread
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -38,6 +38,18 @@ def load_profile(name: str, config_path: Path) -> dict:
     if name not in profiles:
         raise KeyError(f"Profile '{name}' missing in {config_path}")
     return profiles[name]
+
+
+def parse_resolution(value: str) -> Tuple[int, int]:
+    try:
+        width_str, height_str = value.lower().split("x", maxsplit=1)
+        width = int(width_str)
+        height = int(height_str)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"Invalid resolution format '{value}'. Use WIDTHxHEIGHT.") from exc
+    if width <= 0 or height <= 0:
+        raise ValueError("Resolution values must be positive integers.")
+    return width, height
 
 
 def setup_camera(index: int, profile: dict, framerate: int) -> Tuple[Picamera2, Tuple[int, int]]:
@@ -114,11 +126,19 @@ class StereoFrame:
 
 
 class StereoCapture:
-    def __init__(self, config_path: Path, framerate: int):
+    def __init__(self, config_path: Path, framerate: int, resolution: Optional[Tuple[int, int]] = None):
         self.config_path = config_path
         self.framerate = framerate
         self.left_profile = load_profile("cam0", config_path)
         self.right_profile = load_profile("cam1", config_path)
+        if resolution is not None:
+            res_list = [int(resolution[0]), int(resolution[1])]
+            self.left_profile["resolution"] = res_list.copy()
+            self.right_profile["resolution"] = res_list.copy()
+            if list(self.left_profile.get("crop", res_list)) == res_list:
+                self.left_profile["crop"] = res_list.copy()
+            if list(self.right_profile.get("crop", res_list)) == res_list:
+                self.right_profile["crop"] = res_list.copy()
         self.left_profile["frame_rate"] = framerate
         self.right_profile["frame_rate"] = framerate
 
@@ -289,6 +309,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, default=CONFIG_PATH, help="Path to calibration profiles")
     parser.add_argument("--framerate", type=int, default=56, help="Capture framerate for both cameras")
     parser.add_argument(
+        "--resolution",
+        type=str,
+        help="Override sensor resolution as WIDTHxHEIGHT (applies to both cameras)",
+    )
+    parser.add_argument(
         "--ice",
         nargs="*",
         default=["stun:stun.l.google.com:19302"],
@@ -321,6 +346,14 @@ def main() -> None:
     args = build_arg_parser().parse_args()
 
     ca_cert_path: Path | None = None
+    resolution_override: Optional[Tuple[int, int]] = None
+
+    if args.resolution:
+        try:
+            resolution_override = parse_resolution(args.resolution)
+        except ValueError as exc:
+            print(f"[ERROR] {exc}", file=sys.stderr)
+            sys.exit(1)
     if args.ca_cert:
         ca_cert_path = args.ca_cert.expanduser()
         if not ca_cert_path.exists():
@@ -328,7 +361,7 @@ def main() -> None:
             sys.exit(1)
 
     try:
-        capture = StereoCapture(args.config, args.framerate)
+        capture = StereoCapture(args.config, args.framerate, resolution_override)
     except Exception as exc:  # noqa: BLE001
         print(f"[ERROR] Unable to start capture: {exc}", file=sys.stderr)
         sys.exit(1)

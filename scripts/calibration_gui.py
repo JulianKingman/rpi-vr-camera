@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import cv2
 import numpy as np
@@ -63,7 +63,13 @@ class CameraPanel(QWidget):
         profile = self.profiles.get(profile_key, {})
         self.last_processed: np.ndarray | None = None
 
-        self.source_resolution = tuple(profile.get("resolution", [1536, 864]))
+        self.picam = Picamera2(camera_num=camera_index)
+        self.available_resolutions = self._enumerate_resolutions()
+
+        default_resolution = profile.get("resolution")
+        if default_resolution is None and self.available_resolutions:
+            default_resolution = [self.available_resolutions[0][0], self.available_resolutions[0][1]]
+        self.source_resolution = tuple(default_resolution or [1536, 864])
         self.rotation = profile.get("rotation", 0)
         self.hflip = profile.get("hflip", False)
         self.vflip = profile.get("vflip", False)
@@ -78,7 +84,6 @@ class CameraPanel(QWidget):
         self.red_gain = float(gains[0]) if len(gains) > 0 else 1.0
         self.blue_gain = float(gains[1]) if len(gains) > 1 else 1.0
 
-        self.picam = Picamera2(camera_num=camera_index)
         config = self.picam.create_video_configuration(
             main={"size": self.source_resolution},
             controls={"FrameRate": 30},
@@ -92,6 +97,10 @@ class CameraPanel(QWidget):
             self.rotation_combo.addItem(f"{angle}°", angle)
         self.rotation_combo.setCurrentText(f"{self.rotation}°")
         self.rotation_combo.currentIndexChanged.connect(self.on_rotation_changed)
+
+        self.resolution_combo = QComboBox()
+        self._populate_resolution_combo()
+        self.resolution_combo.currentIndexChanged.connect(self.on_resolution_changed)
 
         self.hflip_box = QCheckBox("Horizontal Flip")
         self.hflip_box.setChecked(self.hflip)
@@ -139,38 +148,38 @@ class CameraPanel(QWidget):
         self.crop_h_spin.setValue(self.crop_height)
         self.crop_h_spin.valueChanged.connect(self.on_crop_changed)
 
-        max_offset_x = max(0, self.source_resolution[0] - self.crop_width)
-        max_offset_y = max(0, self.source_resolution[1] - self.crop_height)
         self.offset_x_spin = QSpinBox()
-        self.offset_x_spin.setRange(-max_offset_x // 2, max_offset_x // 2)
-        self.offset_x_spin.setValue(self.offset_x)
         self.offset_x_spin.valueChanged.connect(self.on_offset_changed)
 
         self.offset_y_spin = QSpinBox()
-        self.offset_y_spin.setRange(-max_offset_y // 2, max_offset_y // 2)
-        self.offset_y_spin.setValue(self.offset_y)
         self.offset_y_spin.valueChanged.connect(self.on_offset_changed)
+
+        self.update_crop_limits()
+        self.offset_x_spin.setValue(self.offset_x)
+        self.offset_y_spin.setValue(self.offset_y)
 
         controls_layout = QGridLayout()
         controls_layout.addWidget(QLabel("Rotation"), 0, 0)
         controls_layout.addWidget(self.rotation_combo, 0, 1)
-        controls_layout.addWidget(self.hflip_box, 1, 0, 1, 2)
-        controls_layout.addWidget(self.vflip_box, 2, 0, 1, 2)
-        controls_layout.addWidget(self.awb_box, 3, 0, 1, 2)
-        controls_layout.addWidget(QLabel("AWB Mode"), 4, 0)
-        controls_layout.addWidget(self.awb_mode_combo, 4, 1)
-        controls_layout.addWidget(QLabel("Red Gain"), 5, 0)
-        controls_layout.addWidget(self.red_gain_spin, 5, 1)
-        controls_layout.addWidget(QLabel("Blue Gain"), 6, 0)
-        controls_layout.addWidget(self.blue_gain_spin, 6, 1)
-        controls_layout.addWidget(QLabel("Crop W"), 7, 0)
-        controls_layout.addWidget(self.crop_w_spin, 7, 1)
-        controls_layout.addWidget(QLabel("Crop H"), 8, 0)
-        controls_layout.addWidget(self.crop_h_spin, 8, 1)
-        controls_layout.addWidget(QLabel("Offset X"), 9, 0)
-        controls_layout.addWidget(self.offset_x_spin, 9, 1)
-        controls_layout.addWidget(QLabel("Offset Y"), 10, 0)
-        controls_layout.addWidget(self.offset_y_spin, 10, 1)
+        controls_layout.addWidget(QLabel("Resolution"), 1, 0)
+        controls_layout.addWidget(self.resolution_combo, 1, 1)
+        controls_layout.addWidget(self.hflip_box, 2, 0, 1, 2)
+        controls_layout.addWidget(self.vflip_box, 3, 0, 1, 2)
+        controls_layout.addWidget(self.awb_box, 4, 0, 1, 2)
+        controls_layout.addWidget(QLabel("AWB Mode"), 5, 0)
+        controls_layout.addWidget(self.awb_mode_combo, 5, 1)
+        controls_layout.addWidget(QLabel("Red Gain"), 6, 0)
+        controls_layout.addWidget(self.red_gain_spin, 6, 1)
+        controls_layout.addWidget(QLabel("Blue Gain"), 7, 0)
+        controls_layout.addWidget(self.blue_gain_spin, 7, 1)
+        controls_layout.addWidget(QLabel("Crop W"), 8, 0)
+        controls_layout.addWidget(self.crop_w_spin, 8, 1)
+        controls_layout.addWidget(QLabel("Crop H"), 9, 0)
+        controls_layout.addWidget(self.crop_h_spin, 9, 1)
+        controls_layout.addWidget(QLabel("Offset X"), 10, 0)
+        controls_layout.addWidget(self.offset_x_spin, 10, 1)
+        controls_layout.addWidget(QLabel("Offset Y"), 11, 0)
+        controls_layout.addWidget(self.offset_y_spin, 11, 1)
 
         group = QGroupBox(f"Camera {camera_index} ({profile_key})")
         group_layout = QVBoxLayout(group)
@@ -183,6 +192,51 @@ class CameraPanel(QWidget):
         self.timer.timeout.connect(self.update_view)
         self.timer.start(50)  # ~20 FPS preview
         self.apply_white_balance()
+
+    def _enumerate_resolutions(self) -> List[tuple[int, int, float]]:
+        modes: List[tuple[int, int, float]] = []
+        seen: set[tuple[int, int]] = set()
+        for mode in getattr(self.picam, "sensor_modes", []):
+            width, height = mode.get("size", (0, 0))
+            if not width or not height:
+                continue
+            key = (int(width), int(height))
+            if key in seen:
+                continue
+            fps = float(mode.get("fps", 0.0))
+            modes.append((key[0], key[1], fps))
+            seen.add(key)
+        if not modes:
+            modes.append((self.source_resolution[0], self.source_resolution[1], 0.0))
+        modes.sort(key=lambda item: item[0] * item[1])
+        return modes
+
+    def _populate_resolution_combo(self) -> None:
+        self.resolution_combo.blockSignals(True)
+        self.resolution_combo.clear()
+        current = tuple(self.source_resolution)
+        selected_index = -1
+        for idx, (w, h, fps) in enumerate(self.available_resolutions):
+            label = f"{w}x{h}"
+            if fps:
+                label += f" @ {fps:.1f} fps"
+            self.resolution_combo.addItem(label, (w, h))
+            if (w, h) == current:
+                selected_index = idx
+        if selected_index == -1:
+            label = f"{current[0]}x{current[1]} (profile)"
+            self.resolution_combo.addItem(label, current)
+            selected_index = self.resolution_combo.count() - 1
+        self.resolution_combo.setCurrentIndex(selected_index)
+        self.resolution_combo.blockSignals(False)
+
+    def update_crop_limits(self) -> None:
+        self.crop_w_spin.setRange(64, self.source_resolution[0])
+        self.crop_h_spin.setRange(64, self.source_resolution[1])
+        max_offset_x = max(0, self.source_resolution[0] - self.crop_width)
+        max_offset_y = max(0, self.source_resolution[1] - self.crop_height)
+        self.offset_x_spin.setRange(-max_offset_x // 2, max_offset_x // 2)
+        self.offset_y_spin.setRange(-max_offset_y // 2, max_offset_y // 2)
 
     def on_rotation_changed(self) -> None:
         self.rotation = self.rotation_combo.currentData()
@@ -217,10 +271,7 @@ class CameraPanel(QWidget):
     def on_crop_changed(self) -> None:
         self.crop_width = self.crop_w_spin.value()
         self.crop_height = self.crop_h_spin.value()
-        max_offset_x = max(0, self.source_resolution[0] - self.crop_width)
-        max_offset_y = max(0, self.source_resolution[1] - self.crop_height)
-        self.offset_x_spin.setRange(-max_offset_x // 2, max_offset_x // 2)
-        self.offset_y_spin.setRange(-max_offset_y // 2, max_offset_y // 2)
+        self.update_crop_limits()
 
     def on_offset_changed(self) -> None:
         self.offset_x = self.offset_x_spin.value()
@@ -258,6 +309,66 @@ class CameraPanel(QWidget):
         y_start = (h - side) // 2
         x_start = (w - side) // 2
         return cropped[y_start : y_start + side, x_start : x_start + side].copy()
+
+    def on_resolution_changed(self) -> None:
+        data = self.resolution_combo.currentData()
+        if not data:
+            return
+        new_res = (int(data[0]), int(data[1]))
+        if new_res == tuple(self.source_resolution):
+            return
+        self._apply_resolution(new_res)
+
+    def _apply_resolution(self, resolution: Tuple[int, int]) -> None:
+        previous_resolution = tuple(self.source_resolution)
+        full_width = self.crop_width >= previous_resolution[0]
+        full_height = self.crop_height >= previous_resolution[1]
+
+        self.timer.stop()
+        try:
+            self.picam.stop()
+        except Exception:  # noqa: BLE001
+            pass
+
+        config = self.picam.create_video_configuration(
+            main={"size": resolution},
+            controls={"FrameRate": 30},
+            buffer_count=4,
+        )
+        self.picam.configure(config)
+        self.picam.start()
+
+        self.source_resolution = resolution
+
+        self.crop_width = min(self.crop_width, resolution[0])
+        self.crop_height = min(self.crop_height, resolution[1])
+
+        if full_width:
+            self.crop_width = resolution[0]
+        if full_height:
+            self.crop_height = resolution[1]
+
+        self.crop_w_spin.blockSignals(True)
+        self.crop_h_spin.blockSignals(True)
+        self.crop_w_spin.setValue(self.crop_width)
+        self.crop_h_spin.setValue(self.crop_height)
+        self.crop_w_spin.blockSignals(False)
+        self.crop_h_spin.blockSignals(False)
+
+        self.update_crop_limits()
+
+        self.offset_x = int(np.clip(self.offset_x, self.offset_x_spin.minimum(), self.offset_x_spin.maximum()))
+        self.offset_y = int(np.clip(self.offset_y, self.offset_y_spin.minimum(), self.offset_y_spin.maximum()))
+        self.offset_x_spin.blockSignals(True)
+        self.offset_y_spin.blockSignals(True)
+        self.offset_x_spin.setValue(self.offset_x)
+        self.offset_y_spin.setValue(self.offset_y)
+        self.offset_x_spin.blockSignals(False)
+        self.offset_y_spin.blockSignals(False)
+
+        self.apply_white_balance()
+        self._populate_resolution_combo()
+        self.timer.start(50)
 
     def apply_white_balance(self) -> None:
         controls = {"AwbEnable": bool(self.awb_enable)}
