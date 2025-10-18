@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -26,6 +27,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from cam_utils import get_awb_mode_names, resolve_awb_mode
 
 # Ensure we can reuse helper utilities (optional, fall back gracefully)
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -69,6 +72,11 @@ class CameraPanel(QWidget):
         self.crop_height = crop[1]
         self.offset_x = profile.get("offset_x", 0)
         self.offset_y = profile.get("offset_y", 0)
+        self.awb_enable = profile.get("awb_enable", True)
+        self.awb_mode = str(profile.get("awb_mode", "auto")).lower()
+        gains = profile.get("colour_gains", [1.0, 1.0])
+        self.red_gain = float(gains[0]) if len(gains) > 0 else 1.0
+        self.blue_gain = float(gains[1]) if len(gains) > 1 else 1.0
 
         self.picam = Picamera2(camera_num=camera_index)
         config = self.picam.create_video_configuration(
@@ -78,10 +86,6 @@ class CameraPanel(QWidget):
         )
         self.picam.configure(config)
         self.picam.start()
-
-        self.image_label = QLabel()
-        self.image_label.setAlignment(Qt.AlignCenter)
-        self.image_label.setMinimumSize(640, 360)
 
         self.rotation_combo = QComboBox()
         for angle in (0, 90, 180, 270):
@@ -96,6 +100,34 @@ class CameraPanel(QWidget):
         self.vflip_box = QCheckBox("Vertical Flip")
         self.vflip_box.setChecked(self.vflip)
         self.vflip_box.toggled.connect(self.on_vflip_toggled)
+
+        self.awb_box = QCheckBox("Auto White Balance")
+        self.awb_box.setChecked(self.awb_enable)
+        self.awb_box.toggled.connect(self.on_awb_toggled)
+
+        self.awb_mode_combo = QComboBox()
+        awb_modes = list(get_awb_mode_names())
+        self.awb_mode_combo.addItems(awb_modes)
+        if self.awb_mode not in awb_modes:
+            self.awb_mode_combo.addItem(self.awb_mode)
+        index = self.awb_mode_combo.findText(self.awb_mode)
+        if index >= 0:
+            self.awb_mode_combo.setCurrentIndex(index)
+        self.awb_mode_combo.currentTextChanged.connect(self.on_awb_mode_changed)
+
+        self.red_gain_spin = QDoubleSpinBox()
+        self.red_gain_spin.setRange(0.5, 8.0)
+        self.red_gain_spin.setSingleStep(0.05)
+        self.red_gain_spin.setDecimals(2)
+        self.red_gain_spin.setValue(self.red_gain)
+        self.red_gain_spin.valueChanged.connect(self.on_gain_changed)
+
+        self.blue_gain_spin = QDoubleSpinBox()
+        self.blue_gain_spin.setRange(0.5, 8.0)
+        self.blue_gain_spin.setSingleStep(0.05)
+        self.blue_gain_spin.setDecimals(2)
+        self.blue_gain_spin.setValue(self.blue_gain)
+        self.blue_gain_spin.valueChanged.connect(self.on_gain_changed)
 
         self.crop_w_spin = QSpinBox()
         self.crop_w_spin.setRange(64, self.source_resolution[0])
@@ -124,18 +156,24 @@ class CameraPanel(QWidget):
         controls_layout.addWidget(self.rotation_combo, 0, 1)
         controls_layout.addWidget(self.hflip_box, 1, 0, 1, 2)
         controls_layout.addWidget(self.vflip_box, 2, 0, 1, 2)
-        controls_layout.addWidget(QLabel("Crop W"), 3, 0)
-        controls_layout.addWidget(self.crop_w_spin, 3, 1)
-        controls_layout.addWidget(QLabel("Crop H"), 4, 0)
-        controls_layout.addWidget(self.crop_h_spin, 4, 1)
-        controls_layout.addWidget(QLabel("Offset X"), 5, 0)
-        controls_layout.addWidget(self.offset_x_spin, 5, 1)
-        controls_layout.addWidget(QLabel("Offset Y"), 6, 0)
-        controls_layout.addWidget(self.offset_y_spin, 6, 1)
+        controls_layout.addWidget(self.awb_box, 3, 0, 1, 2)
+        controls_layout.addWidget(QLabel("AWB Mode"), 4, 0)
+        controls_layout.addWidget(self.awb_mode_combo, 4, 1)
+        controls_layout.addWidget(QLabel("Red Gain"), 5, 0)
+        controls_layout.addWidget(self.red_gain_spin, 5, 1)
+        controls_layout.addWidget(QLabel("Blue Gain"), 6, 0)
+        controls_layout.addWidget(self.blue_gain_spin, 6, 1)
+        controls_layout.addWidget(QLabel("Crop W"), 7, 0)
+        controls_layout.addWidget(self.crop_w_spin, 7, 1)
+        controls_layout.addWidget(QLabel("Crop H"), 8, 0)
+        controls_layout.addWidget(self.crop_h_spin, 8, 1)
+        controls_layout.addWidget(QLabel("Offset X"), 9, 0)
+        controls_layout.addWidget(self.offset_x_spin, 9, 1)
+        controls_layout.addWidget(QLabel("Offset Y"), 10, 0)
+        controls_layout.addWidget(self.offset_y_spin, 10, 1)
 
         group = QGroupBox(f"Camera {camera_index} ({profile_key})")
         group_layout = QVBoxLayout(group)
-        group_layout.addWidget(self.image_label)
         group_layout.addLayout(controls_layout)
 
         layout = QVBoxLayout(self)
@@ -144,6 +182,7 @@ class CameraPanel(QWidget):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_view)
         self.timer.start(50)  # ~20 FPS preview
+        self.apply_white_balance()
 
     def on_rotation_changed(self) -> None:
         self.rotation = self.rotation_combo.currentData()
@@ -153,6 +192,27 @@ class CameraPanel(QWidget):
 
     def on_vflip_toggled(self, state: bool) -> None:
         self.vflip = state
+
+    def on_awb_toggled(self, state: bool) -> None:
+        self.awb_enable = state
+        self.apply_white_balance()
+
+    def on_awb_mode_changed(self, mode: str) -> None:
+        self.awb_mode = mode
+        if self.awb_enable:
+            self.apply_white_balance()
+
+    def update_gain_controls_state(self) -> None:
+        manual = not self.awb_enable
+        self.red_gain_spin.setEnabled(manual)
+        self.blue_gain_spin.setEnabled(manual)
+        self.awb_mode_combo.setEnabled(self.awb_enable)
+
+    def on_gain_changed(self, _value: float) -> None:
+        self.red_gain = self.red_gain_spin.value()
+        self.blue_gain = self.blue_gain_spin.value()
+        if not self.awb_enable:
+            self.apply_white_balance()
 
     def on_crop_changed(self) -> None:
         self.crop_width = self.crop_w_spin.value()
@@ -199,17 +259,22 @@ class CameraPanel(QWidget):
         x_start = (w - side) // 2
         return cropped[y_start : y_start + side, x_start : x_start + side].copy()
 
+    def apply_white_balance(self) -> None:
+        controls = {"AwbEnable": bool(self.awb_enable)}
+        if not self.awb_enable:
+            controls["ColourGains"] = (float(self.red_gain_spin.value()), float(self.blue_gain_spin.value()))
+        else:
+            mode_value = resolve_awb_mode(self.awb_mode_combo.currentText())
+            if mode_value is not None:
+                controls["AwbMode"] = mode_value
+        self.picam.set_controls(controls)
+        self.update_gain_controls_state()
+
     def update_view(self) -> None:
         frame = self.picam.capture_array()
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         processed = self.process_frame(frame)
         self.last_processed = processed
-        h, w, ch = processed.shape
-        image = QImage(processed.data, w, h, ch * w, QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(image).scaled(
-            self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
-        self.image_label.setPixmap(pixmap)
 
     def shutdown(self) -> None:
         self.timer.stop()
@@ -225,6 +290,12 @@ class CameraPanel(QWidget):
             "crop": [int(self.crop_width), int(self.crop_height)],
             "offset_x": int(self.offset_x),
             "offset_y": int(self.offset_y),
+            "awb_enable": bool(self.awb_enable),
+            "awb_mode": str(self.awb_mode_combo.currentText()),
+            "colour_gains": [
+                float(self.red_gain_spin.value()),
+                float(self.blue_gain_spin.value()),
+            ],
         }
 
 
@@ -236,13 +307,9 @@ class CalibrationWindow(QWidget):
         self.left_panel = CameraPanel(0, "cam0")
         self.right_panel = CameraPanel(1, "cam1")
 
-        self.panels_layout = QHBoxLayout()
-        self.panels_layout.addWidget(self.left_panel)
-        self.panels_layout.addWidget(self.right_panel)
-
         self.combined_label = QLabel()
         self.combined_label.setAlignment(Qt.AlignCenter)
-        self.combined_label.setMinimumHeight(320)
+        self.combined_label.setMinimumHeight(360)
 
         self.save_button = QPushButton("Save Calibration")
         self.save_button.clicked.connect(self.save_profiles)
@@ -250,14 +317,18 @@ class CalibrationWindow(QWidget):
         self.swap_check = QCheckBox("Swap Left/Right Preview")
         self.swap_check.toggled.connect(self.on_swap_toggled)
 
+        self.controls_layout = QHBoxLayout()
+        self.controls_layout.addWidget(self.left_panel)
+        self.controls_layout.addWidget(self.right_panel)
+
         controls_layout = QHBoxLayout()
         controls_layout.addWidget(self.swap_check)
         controls_layout.addStretch()
         controls_layout.addWidget(self.save_button)
 
         root_layout = QVBoxLayout(self)
-        root_layout.addLayout(self.panels_layout)
         root_layout.addWidget(self.combined_label)
+        root_layout.addLayout(self.controls_layout)
         root_layout.addLayout(controls_layout)
 
         self.combined_timer = QTimer(self)
@@ -275,17 +346,17 @@ class CalibrationWindow(QWidget):
 
     def on_swap_toggled(self, checked: bool) -> None:
         self.swap_order = checked
-        while self.panels_layout.count():
-            item = self.panels_layout.takeAt(0)
+        while self.controls_layout.count():
+            item = self.controls_layout.takeAt(0)
             widget = item.widget()
             if widget:
                 widget.setParent(None)
         if self.swap_order:
-            self.panels_layout.addWidget(self.right_panel)
-            self.panels_layout.addWidget(self.left_panel)
+            self.controls_layout.addWidget(self.right_panel)
+            self.controls_layout.addWidget(self.left_panel)
         else:
-            self.panels_layout.addWidget(self.left_panel)
-            self.panels_layout.addWidget(self.right_panel)
+            self.controls_layout.addWidget(self.left_panel)
+            self.controls_layout.addWidget(self.right_panel)
 
     def update_combined_view(self) -> None:
         left_frame = self.left_panel.last_processed

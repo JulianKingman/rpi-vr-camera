@@ -13,10 +13,30 @@ if SYSTEM_DIST.exists() and str(SYSTEM_DIST) not in sys.path:
     sys.path.append(str(SYSTEM_DIST))
 
 import yaml
-from libcamera import Transform
+from libcamera import Transform, controls
 from picamera2 import Picamera2
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "camera_profiles.yaml"
+
+_AWB_MODE_CANDIDATES = [
+    ("auto", "Auto"),
+    ("incandescent", "Incandescent"),
+    ("tungsten", "Tungsten"),
+    ("fluorescent", "Fluorescent"),
+    ("indoor", "Indoor"),
+    ("daylight", "Daylight"),
+    ("cloudy", "Cloudy"),
+    ("shade", "Shade"),
+    ("sunlight", "Sunlight"),
+    ("horizon", "Horizon"),
+    ("custom", "Custom"),
+]
+
+AWB_MODE_MAP: Dict[str, int] = {}
+for key, enum_name in _AWB_MODE_CANDIDATES:
+    value = getattr(controls.AwbModeEnum, enum_name, None)
+    if value is not None:
+        AWB_MODE_MAP[key] = value
 
 
 @dataclass
@@ -73,6 +93,16 @@ def load_profile(name: str, path: Optional[Path] = None) -> Dict[str, Any]:
     if name not in profiles:
         raise KeyError(f"Profile '{name}' not found in {CONFIG_PATH}")
     return profiles[name]
+
+
+def get_awb_mode_names() -> Tuple[str, ...]:
+    return tuple(AWB_MODE_MAP.keys())
+
+
+def resolve_awb_mode(name: Optional[str]) -> Optional[int]:
+    if not name:
+        return None
+    return AWB_MODE_MAP.get(str(name).lower())
 
 
 def open_camera(

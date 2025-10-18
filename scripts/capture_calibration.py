@@ -14,7 +14,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from cam_utils import Crop, apply_center_crop, build_transform, load_profile, open_camera  # noqa: E402
+from cam_utils import (  # noqa: E402
+    Crop,
+    apply_center_crop,
+    build_transform,
+    load_profile,
+    open_camera,
+    resolve_awb_mode,
+)
 
 
 def save_frame(frame: np.ndarray, path: Path) -> None:
@@ -38,13 +45,28 @@ def capture_frames(
     crop_vals = profile.get("crop")
 
     transform = build_transform(rotation, hflip, vflip)
-    cam = open_camera(cam_index, transform, resolution, controls={"FrameRate": 120.0})
+    frame_rate = float(profile.get("frame_rate", 56.0))
+    cam = open_camera(cam_index, transform, resolution, controls={"FrameRate": frame_rate})
 
     if crop_vals:
         crop = Crop(width=int(crop_vals[0]), height=int(crop_vals[1]))
         apply_center_crop(cam, crop)
 
     cam.start()
+    awb_controls = {}
+    awb_enable = profile.get("awb_enable")
+    gains = profile.get("colour_gains")
+    mode_value = resolve_awb_mode(profile.get("awb_mode"))
+    if awb_enable is not None:
+        awb_controls["AwbEnable"] = bool(awb_enable)
+        if awb_enable:
+            if mode_value is not None:
+                awb_controls["AwbMode"] = mode_value
+    manual_wb = awb_enable is not None and not bool(awb_enable)
+    if gains and len(gains) == 2 and manual_wb:
+        awb_controls["ColourGains"] = (float(gains[0]), float(gains[1]))
+    if awb_controls:
+        cam.set_controls(awb_controls)
     time.sleep(1.0)  # allow exposure to settle
 
     for idx in range(count):

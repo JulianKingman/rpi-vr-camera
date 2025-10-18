@@ -71,8 +71,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--resolution",
         type=str,
-        default="1536x864",
-        help="target capture size WxH (default 1536x864)",
+        default="2304x1296",
+        help="target capture size WxH (default 2304x1296)",
     )
     parser.add_argument(
         "--rotation",
@@ -110,7 +110,7 @@ def main() -> None:
         raise SystemExit(str(exc)) from exc
 
     transform = build_transform(args.rotation, args.hflip, args.vflip)
-    cam = open_camera(args.camera, transform, target_size, controls={"FrameRate": 120.0})
+    cam = open_camera(args.camera, transform, target_size, controls={"FrameRate": 56.0})
 
     if args.crop:
         try:

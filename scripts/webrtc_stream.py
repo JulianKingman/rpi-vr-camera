@@ -23,6 +23,8 @@ from aiortc.mediastreams import MediaStreamError
 from av import AudioFrame, VideoFrame
 from picamera2 import Picamera2
 
+from cam_utils import resolve_awb_mode
+
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "camera_profiles.yaml"
 STATIC_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -38,15 +40,30 @@ def load_profile(name: str, config_path: Path) -> dict:
 
 
 def setup_camera(index: int, profile: dict, framerate: int) -> Tuple[Picamera2, Tuple[int, int]]:
-    resolution = tuple(profile.get("resolution", [1536, 864]))
+    resolution = tuple(profile.get("resolution", [2304, 1296]))
+    target_rate = float(profile.get("frame_rate", framerate))
     cam = Picamera2(camera_num=index)
     config = cam.create_video_configuration(
         main={"size": resolution},
-        controls={"FrameRate": framerate},
+        controls={"FrameRate": target_rate},
         buffer_count=6,
     )
     cam.configure(config)
     cam.start()
+    runtime_controls: Dict[str, object] = {}
+    awb_enable = profile.get("awb_enable")
+    gains = profile.get("colour_gains")
+    mode_value = resolve_awb_mode(profile.get("awb_mode"))
+    if awb_enable is not None:
+        runtime_controls["AwbEnable"] = bool(awb_enable)
+        if awb_enable:
+            if mode_value is not None:
+                runtime_controls["AwbMode"] = mode_value
+    manual_wb = awb_enable is not None and not bool(awb_enable)
+    if gains and len(gains) == 2 and manual_wb:
+        runtime_controls["ColourGains"] = (float(gains[0]), float(gains[1]))
+    if runtime_controls:
+        cam.set_controls(runtime_controls)
     return cam, resolution
 
 
@@ -101,8 +118,8 @@ class StereoCapture:
         self.framerate = framerate
         self.left_profile = load_profile("cam0", config_path)
         self.right_profile = load_profile("cam1", config_path)
-        self.left_profile.setdefault("frame_rate", framerate)
-        self.right_profile.setdefault("frame_rate", framerate)
+        self.left_profile["frame_rate"] = framerate
+        self.right_profile["frame_rate"] = framerate
 
         self.left_cam, self.left_res = setup_camera(0, self.left_profile, framerate)
         self.right_cam, self.right_res = setup_camera(1, self.right_profile, framerate)
@@ -260,7 +277,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", default="0.0.0.0", help="Host/IP to bind (use 0.0.0.0 for all interfaces)")
     parser.add_argument("--port", type=int, default=8080, help="HTTP/WebSocket port for signaling")
     parser.add_argument("--config", type=Path, default=CONFIG_PATH, help="Path to calibration profiles")
-    parser.add_argument("--framerate", type=int, default=60, help="Capture framerate for both cameras")
+    parser.add_argument("--framerate", type=int, default=56, help="Capture framerate for both cameras")
     parser.add_argument(
         "--ice",
         nargs="*",

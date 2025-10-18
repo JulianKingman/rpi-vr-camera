@@ -13,6 +13,8 @@ import numpy as np
 import yaml
 from picamera2 import Picamera2
 
+from cam_utils import resolve_awb_mode
+
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "camera_profiles.yaml"
 
 
@@ -26,17 +28,31 @@ def load_profile(key: str) -> dict:
     return profiles[key]
 
 
-def setup_camera(index: int, profile: dict) -> tuple[Picamera2, tuple[int, int], dict]:
-    resolution = tuple(profile.get("resolution", [1536, 864]))
-    controls = {"FrameRate": profile.get("frame_rate", 60)}
+def setup_camera(index: int, profile: dict, fallback_rate: int) -> tuple[Picamera2, tuple[int, int], dict]:
+    resolution = tuple(profile.get("resolution", [2304, 1296]))
+    target_rate = float(profile.get("frame_rate", fallback_rate))
     cam = Picamera2(camera_num=index)
     config = cam.create_video_configuration(
         main={"size": resolution},
-        controls=controls,
+        controls={"FrameRate": target_rate},
         buffer_count=6,
     )
     cam.configure(config)
     cam.start()
+    runtime_controls: dict[str, object] = {}
+    awb_enable = profile.get("awb_enable")
+    gains = profile.get("colour_gains")
+    mode_value = resolve_awb_mode(profile.get("awb_mode"))
+    if awb_enable is not None:
+        runtime_controls["AwbEnable"] = bool(awb_enable)
+        if awb_enable:
+            if mode_value is not None:
+                runtime_controls["AwbMode"] = mode_value
+    manual_wb = awb_enable is not None and not bool(awb_enable)
+    if gains and len(gains) == 2 and manual_wb:
+        runtime_controls["ColourGains"] = (float(gains[0]), float(gains[1]))
+    if runtime_controls:
+        cam.set_controls(runtime_controls)
     return cam, resolution, profile
 
 
@@ -81,7 +97,7 @@ def process_frame(frame: np.ndarray, profile: dict, source_resolution: tuple[int
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=CONFIG_PATH, help="Path to camera profiles YAML")
-    parser.add_argument("--framerate", type=int, default=60, help="Target frame rate for capture")
+    parser.add_argument("--framerate", type=int, default=56, help="Target frame rate for capture")
     parser.add_argument("--headless", action="store_true", help="Run without GUI (prints frame timing)")
     parser.add_argument("--duration", type=float, default=0.0, help="Optional duration limit in seconds (0=run forever)")
     return parser.parse_args()
@@ -102,8 +118,8 @@ def main() -> None:
     try:
         left_profile["frame_rate"] = args.framerate
         right_profile["frame_rate"] = args.framerate
-        left_cam, left_res, _ = setup_camera(0, left_profile)
-        right_cam, right_res, _ = setup_camera(1, right_profile)
+        left_cam, left_res, _ = setup_camera(0, left_profile, args.framerate)
+        right_cam, right_res, _ = setup_camera(1, right_profile, args.framerate)
     except Exception as exc:  # noqa: BLE001
         print(f"[ERROR] Failed to start cameras: {exc}", file=sys.stderr)
         sys.exit(1)

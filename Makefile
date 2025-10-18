@@ -3,10 +3,10 @@
 PYTHON ?= python3
 VENV_PY := .venv/bin/python3
 CAMERA ?= 0
-RESOLUTION ?= 1536x864
-FRAMERATE ?= 120
-WIDTH ?= 1536
-HEIGHT ?= 864
+RESOLUTION ?= 2304x1296
+FRAMERATE ?= 56
+WIDTH ?= 2304
+HEIGHT ?= 1296
 OUTPUT ?= capture.h264
 PTS ?= capture.pts
 PREVIEW ?= null

@@ -62,7 +62,7 @@ make stream-webrtc ARGS="--host 0.0.0.0 --port 8443"  # WebRTC/WebXR server (bro
 OUT_ROOT=test-output make capture-left  # store captures under test-output/...
 ```
 
-- `make help` lists all available targets and tunable variables (override defaults like `FRAMERATE=56` or `OUTPUT=myclip.h264`).
+- `make help` lists all available targets and tunable variables (override defaults like `FRAMERATE=90` or `OUTPUT=myclip.h264`).
 - Use `make capture CAMERA=0 OUTPUT=capture-output/custom/clip.mp4 PTS=capture-output/custom/clip.pts` for ad-hoc names (override the base folder with `OUT_ROOT=...`).
 - `make capture-stereo` records left then right under a shared timestamp label (sequential start for now).
 - Default `TIMEOUT=5000` yields a 5 s clip; try `TIMEOUT=30000 make capture-left` for half a minute, or `TIMEOUT=0 KEYPRESS=1` to keep recording until Enter.
@@ -72,6 +72,13 @@ OUT_ROOT=test-output make capture-left  # store captures under test-output/...
 - Run `make stream-webrtc ARGS="--host 0.0.0.0 --port 8443"` and open `https://<pi-ip>:8443/` in a WebRTC-capable browser (Quest, desktop) to view the stream. Once connected, hit **Enter VR** to split the feed per eye inside the headset.
 - Run `make calibration-ui` for a live Qt preview where you can tweak rotation, flips, crops, and offsets (writes back to `config/camera_profiles.yaml`).
 - Captures land under `capture-output/<left|right>/<YYYYMMDD_HHMMSS>` with raw `.h264`, matching `.mp4`, and `.pts`; override the base folder via `OUT_ROOT=...`.
+
+## Operational Notes
+- **Latency instrumentation** – Add a monotonic `sent_at` timestamp to the WebRTC data channel and render a small HUD in the WebXR client so you can read end-to-end latency and fps directly inside the Quest once the proxy is removed.
+- **Latency tuning ideas** – Prefer a hard link (Quest Link/Air Link via Ethernet PC or USB-C tether) or a dedicated Wi-Fi 6 AP near the Pi; if you stay on Wi-Fi, lock to 5 GHz, disable power save with `iw wlan0 set power_save off`, and use low-latency encoder settings (H.264 baseline, IDR every frame, shallow queues).
+- **SSL without ngrok** – Follow the flow outlined in [this Node-RED forum thread](https://discourse.nodered.org/t/setup-of-https-ssl-local-webxr-quest-development/96224) to self-host HTTPS: create a local CA/self-signed cert, install it on the Quest, and point `make stream-webrtc` at the resulting key/cert pair.
+- **Color & white balance** – The calibration UI now includes an auto white balance toggle, AWB mode selector (try `incandescent`/`tungsten` for warmer scenes), and manual red/blue gains; capture a gray card to lock gains, then revisit LUT/CCM adjustments if a blue shift remains.
+- **Printing this guide** – Use `lp README.md` (or `lp -o landscape README.md`) to send the file to the default printer, or generate a PDF first via `pandoc README.md -o rpi-vr-camera.pdf` and print that artifact.
 
 ## Calibration UI (Qt)
 ## WebRTC/WebXR Streaming
@@ -92,22 +99,22 @@ Launch the desktop calibration tool to visualise both camera streams side by sid
 make calibration-ui
 ```
 
-- Rotation, horizontal/vertical flips, crop size, and XY offsets update the preview immediately.
+- Rotation, horizontal/vertical flips, crop size, XY offsets, and white balance controls update the preview immediately.
 - Press **Save Calibration** to write the values back into `config/camera_profiles.yaml`; subsequent scripts (capture, streaming) will pick up the new defaults.
 - Close the window to release both cameras before running other capture commands.
 - After saving, try `make stream-preview` or `make stream-cast` to confirm stereo alignment in real time.
 
-## Prototype 120 FPS Capture
-Aim for the 1536×864@120 mode first to validate dual-camera throughput.
+## Prototype 56 FPS Capture
+The baseline profile now targets the 2304×1296@56 mode for higher resolution while staying inside the ISP bandwidth budget.
 
 ```bash
 # Left camera (camera index 0)
-rpicam-vid --camera 0 --framerate 120 --width 1536 --height 864 \
+rpicam-vid --camera 0 --framerate 56 --width 2304 --height 1296 \
   --codec h264 --inline --nopreview --timeout 5000 \
   --output left.mp4 --save-pts left.pts
 
 # Right camera (camera index 1)
-rpicam-vid --camera 1 --framerate 120 --width 1536 --height 864 \
+rpicam-vid --camera 1 --framerate 56 --width 2304 --height 1296 \
   --codec h264 --inline --nopreview --timeout 5000 \
   --output right.mp4 --save-pts right.pts
 ```
@@ -117,9 +124,9 @@ rpicam-vid --camera 1 --framerate 120 --width 1536 --height 864 \
 - The `.pts` sidecar stores per-frame timestamps (needed for muxing or latency analysis). Skip it with `SAVE_PTS=0 make capture-left` if you just need video frames.
 - Output `.mp4` duration honours the `FRAMERATE` value; adjust it before capture if you switch modes (the converter re-synthesises timestamps internally).
 - Files are stored under `capture-output/<left|right>/<timestamp>/`; you can override the root folder with `OUT_ROOT`.
-- To re-enable a live window, run from the Pi’s Wayland console and use `--preview drm,0,0,640,360`. On older stacks try `QT_QPA_PLATFORM=wayland rpicam-vid ... --preview 0,0,640,360`. Avoid X11 forwarding/headless X, which triggers the “failed to import fd” crash at 120 fps. Add `--info-text "%frame%"` for an on-screen fps counter.
+- To re-enable a live window, run from the Pi’s Wayland console and use `--preview drm,0,0,640,360`. On older stacks try `QT_QPA_PLATFORM=wayland rpicam-vid ... --preview 0,0,640,360`. Avoid X11 forwarding/headless X, which tends to crash in high-frame-rate modes. Add `--info-text "%frame%"` for an on-screen fps counter.
 - Monitor dropped frames in the terminal output; any sustained underrun suggests power, thermal, or I/O contention.
-- Use `--listen` on one camera and `rpicam-vid --listen --port 8888 --framerate 120 ...` on another Pi to stream over the network if you need remote inspection.
+- Use `--listen` on one camera and `rpicam-vid --listen --port 8888 --framerate 56 ...` on another Pi to stream over the network if you need remote inspection.
 - For Oculus Quest 2 testing, plan to feed the encoded stream into a WebRTC/WebXR client; target <15 ms glass-to-glass by minimizing buffering in the transport stage.
 
 
@@ -127,7 +134,7 @@ rpicam-vid --camera 1 --framerate 120 --width 1536 --height 864 \
 1. **Dual camera capture**
    - Verify both modules enumerate via `rpicam-hello --list-cameras` (or `libcamera-hello` on older images).
    - Use `scripts/list_cameras.py` (or `make preview CAMERA=0 METADATA=1 PREVIEW=null`) to inspect per-sensor modes and controls.
-   - `make preview CAMERA=0 METADATA=1` (and `CAMERA=1`) starts a 1536×864@120 preview with optional rotation, crop, and live metadata output for debugging.
+   - `make preview CAMERA=0 METADATA=1` (and `CAMERA=1`) now defaults to a 2304×1296@56 preview with optional rotation, crop, and live metadata output for debugging.
    - `make stream-preview` (Picamera2) shows both calibrated feeds in real time for quick stereo verification.
    - `make stream-cast ARGS="--endpoint udp://host:port"` mirrors the preview while ffmpeg multicasts the combined feed.
    - `make capture-stereo` records both sensors in parallel, storing synchronized outputs under a shared timestamp label.
@@ -140,7 +147,7 @@ rpicam-vid --camera 1 --framerate 120 --width 1536 --height 864 \
    - Implement lens shading / color balance harmonization if mismatched.
 3. **Framerate and exposure controls**
    - Surface controls for `FrameDurationLimits`, `AnalogueGain`, `ExposureTime` via libcamera ControlList (task 3).
-   - Use `scripts/set_controls.py --camera 0 --fps 120 --exposure 8000 --gain 1.0 --disable-ae` to lock in capture parameters; extend to named presets in `config/camera_profiles.yaml`.
+   - Use `scripts/set_controls.py --camera 0 --fps 56 --exposure 8000 --gain 1.0 --disable-ae` to lock in capture parameters; extend to named presets in `config/camera_profiles.yaml`.
    - Monitor dropped frames and thermal throttling; add warning overlays/logging.
 4. **Stereo stitching & VR formatting**
    - Prototype GPU-accelerated stereo compositor: rectify -> stitch (side-by-side or equirectangular depending on headset target).
@@ -161,7 +168,7 @@ rpicam-vid --camera 1 --framerate 120 --width 1536 --height 864 \
 - `make convert-left` / `make convert-right` – regenerate MP4s from stored raw streams if you rerun the converter.
 - `make capture-left` / `make capture-right` – grab one camera stream until you hit Enter.
 - `scripts/list_cameras.py --show-controls` – enumerate sensors, supported modes, and control metadata.
-- `scripts/set-controls.py --camera 0 --fps 120 --exposure 10000` – tweak capture timing on the fly.
+- `scripts/set-controls.py --camera 0 --fps 56 --exposure 10000` – tweak capture timing on the fly.
 - `config/camera_profiles.yaml` – central place for per-camera transforms, crops, and future presets.
 
 ## Running (Design Phase)

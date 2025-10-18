@@ -15,6 +15,8 @@ import numpy as np
 import yaml
 from picamera2 import Picamera2
 
+from cam_utils import resolve_awb_mode
+
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "camera_profiles.yaml"
 
 
@@ -29,15 +31,30 @@ def load_profile(name: str, config_path: Path) -> dict:
 
 
 def setup_camera(index: int, profile: dict, framerate: int) -> Tuple[Picamera2, Tuple[int, int]]:
-    resolution = tuple(profile.get("resolution", [1536, 864]))
+    resolution = tuple(profile.get("resolution", [2304, 1296]))
+    target_rate = float(profile.get("frame_rate", framerate))
     cam = Picamera2(camera_num=index)
     config = cam.create_video_configuration(
         main={"size": resolution},
-        controls={"FrameRate": framerate},
+        controls={"FrameRate": target_rate},
         buffer_count=6,
     )
     cam.configure(config)
     cam.start()
+    runtime_controls: dict[str, object] = {}
+    awb_enable = profile.get("awb_enable")
+    gains = profile.get("colour_gains")
+    mode_value = resolve_awb_mode(profile.get("awb_mode"))
+    if awb_enable is not None:
+        runtime_controls["AwbEnable"] = bool(awb_enable)
+        if awb_enable:
+            if mode_value is not None:
+                runtime_controls["AwbMode"] = mode_value
+    manual_wb = awb_enable is not None and not bool(awb_enable)
+    if gains and len(gains) == 2 and manual_wb:
+        runtime_controls["ColourGains"] = (float(gains[0]), float(gains[1]))
+    if runtime_controls:
+        cam.set_controls(runtime_controls)
     return cam, resolution
 
 
@@ -116,7 +133,7 @@ def spawn_ffmpeg(width: int, height: int, framerate: int, endpoint: str) -> subp
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=CONFIG_PATH, help="Path to calibration profiles")
-    parser.add_argument("--framerate", type=int, default=60, help="Capture frame rate")
+    parser.add_argument("--framerate", type=int, default=56, help="Capture frame rate")
     parser.add_argument(
         "--endpoint",
         type=str,
@@ -138,8 +155,8 @@ def main() -> None:
         print(f"[ERROR] {exc}", file=sys.stderr)
         sys.exit(1)
 
-    left_profile.setdefault("frame_rate", args.framerate)
-    right_profile.setdefault("frame_rate", args.framerate)
+    left_profile["frame_rate"] = args.framerate
+    right_profile["frame_rate"] = args.framerate
 
     try:
         left_cam, left_res = setup_camera(0, left_profile, args.framerate)
