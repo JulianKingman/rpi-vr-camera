@@ -17,6 +17,7 @@ profiles:
     colour_gains:
     - 1.0
     - 1.0
+    bitrate_mbps: 40.0
   cam1:
     description: Right camera (CSI port 1)
     resolution:
@@ -35,6 +36,7 @@ profiles:
     colour_gains:
     - 1.0
     - 1.0
+    bitrate_mbps: 40.0
 calibration:
   chessboard:
     columns: 9

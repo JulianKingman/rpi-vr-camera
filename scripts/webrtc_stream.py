@@ -19,12 +19,32 @@ import cv2
 import numpy as np
 import yaml
 from aiohttp import web
-from aiortc import AudioStreamTrack, RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
+from aiortc import AudioStreamTrack, RTCPeerConnection, RTCSessionDescription, RTCRtpSender, VideoStreamTrack
 from aiortc.mediastreams import MediaStreamError
 from av import AudioFrame, VideoFrame
 from picamera2 import Picamera2
 
 from cam_utils import resolve_awb_mode
+from aiortc.codecs import h264 as h264_codecs
+
+_H264_PATCHED = False
+_H264_TARGET_BITRATE: Optional[int] = None
+
+
+def _ensure_h264_encoder_patch(target_bitrate: int) -> None:
+    global _H264_PATCHED
+    global _H264_TARGET_BITRATE
+    _H264_TARGET_BITRATE = target_bitrate
+    if not _H264_PATCHED:
+        original_init = h264_codecs.H264Encoder.__init__
+
+        def patched_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            if hasattr(self, "target_bitrate") and _H264_TARGET_BITRATE:
+                self.target_bitrate = _H264_TARGET_BITRATE
+
+        h264_codecs.H264Encoder.__init__ = patched_init  # type: ignore[assignment]
+        _H264_PATCHED = True
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "camera_profiles.yaml"
 STATIC_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -142,6 +162,18 @@ class StereoCapture:
         self.left_profile["frame_rate"] = framerate
         self.right_profile["frame_rate"] = framerate
 
+        bitrate_mbps = self.left_profile.get("bitrate_mbps") or self.right_profile.get("bitrate_mbps")
+        self.bitrate_bps: Optional[int]
+        try:
+            self.bitrate_bps = int(float(bitrate_mbps) * 1_000_000) if bitrate_mbps is not None else None
+        except Exception:  # noqa: BLE001
+            self.bitrate_bps = None
+
+        if self.bitrate_bps:
+            h264_codecs.MAX_BITRATE = max(h264_codecs.MAX_BITRATE, self.bitrate_bps)
+            h264_codecs.DEFAULT_BITRATE = max(h264_codecs.DEFAULT_BITRATE, self.bitrate_bps)
+            _ensure_h264_encoder_patch(self.bitrate_bps)
+
         self.left_cam, self.left_res = setup_camera(0, self.left_profile, framerate)
         self.right_cam, self.right_res = setup_camera(1, self.right_profile, framerate)
 
@@ -249,19 +281,53 @@ class WebRTCServer:
         video_track = StereoVideoTrack(self.capture, self.capture.framerate)
         audio_track = SilenceAudioTrack()
 
+        try:
+            video_codecs = RTCRtpSender.getCapabilities("video").codecs  # type: ignore[attr-defined]
+        except AttributeError:
+            video_codecs = None
+
+        h264_codecs = [c for c in video_codecs if c.mimeType.lower() == "video/h264"] if video_codecs else []
+
+        if h264_codecs:
+            print("[INFO] Preferring H.264 codecs for video stream", flush=True)
+        else:
+            print("[WARN] H.264 codec not advertised by client; using default preferences", flush=True)
+
         video_transceiver = next((t for t in pc.getTransceivers() if t.kind == "video"), None)
+        if video_transceiver is None:
+            direction = "sendonly"
+            if h264_codecs:
+                video_transceiver = pc.addTransceiver("video", direction=direction, codecs=h264_codecs)
+            else:
+                video_transceiver = pc.addTransceiver("video", direction=direction)
+        else:
+            try:
+                video_transceiver.direction = "sendonly"
+            except AttributeError:
+                pass
+            if h264_codecs:
+                try:
+                    video_transceiver.setCodecPreferences(h264_codecs)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[WARN] Failed to set codec preferences: {exc}", file=sys.stderr)
+
         if video_transceiver is None:
             await pc.close()
             self.pcs.discard(pc)
             return web.Response(
                 status=400,
                 content_type="application/json",
-                text=json.dumps({"error": "Remote offer did not request video."}),
+                text=json.dumps({"error": "Unable to configure video transceiver."}),
             )
 
-        video_transceiver.direction = "sendonly"
         if video_transceiver.sender:
             video_transceiver.sender.replaceTrack(video_track)
+            encoder = getattr(video_transceiver.sender, "_RTCRtpSender__encoder", None)
+            if encoder and self.capture.bitrate_bps:
+                try:
+                    encoder.target_bitrate = self.capture.bitrate_bps
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[WARN] Failed to set encoder target bitrate: {exc}", file=sys.stderr)
 
         audio_transceiver = next((t for t in pc.getTransceivers() if t.kind == "audio"), None)
         if audio_transceiver:

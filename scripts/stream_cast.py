@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
@@ -97,7 +97,13 @@ def process_frame(frame: np.ndarray, profile: dict, source_resolution: Tuple[int
     return cropped[start_y : start_y + side, start_x : start_x + side].copy()
 
 
-def spawn_ffmpeg(width: int, height: int, framerate: int, endpoint: str) -> subprocess.Popen:
+def spawn_ffmpeg(
+    width: int,
+    height: int,
+    framerate: int,
+    endpoint: str,
+    bitrate_bps: Optional[int],
+) -> subprocess.Popen:
     cmd = [
         "ffmpeg",
         "-loglevel",
@@ -118,12 +124,27 @@ def spawn_ffmpeg(width: int, height: int, framerate: int, endpoint: str) -> subp
         "ultrafast",
         "-tune",
         "zerolatency",
-        "-pix_fmt",
-        "yuv420p",
-        "-f",
-        "rtp" if endpoint.startswith("rtp") else "mpegts",
-        endpoint,
     ]
+    if bitrate_bps:
+        cmd.extend(
+            [
+                "-b:v",
+                str(bitrate_bps),
+                "-maxrate",
+                str(bitrate_bps),
+                "-bufsize",
+                str(max(bitrate_bps // 2, 1_000_000)),
+            ]
+        )
+    cmd.extend(
+        [
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "rtp" if endpoint.startswith("rtp") else "mpegts",
+            endpoint,
+        ]
+    )
     try:
         return subprocess.Popen(cmd, stdin=subprocess.PIPE)
     except FileNotFoundError as exc:
@@ -158,6 +179,12 @@ def main() -> None:
     left_profile["frame_rate"] = args.framerate
     right_profile["frame_rate"] = args.framerate
 
+    bitrate_mbps = left_profile.get("bitrate_mbps") or right_profile.get("bitrate_mbps")
+    try:
+        bitrate_bps: Optional[int] = int(float(bitrate_mbps) * 1_000_000) if bitrate_mbps is not None else None
+    except Exception:  # noqa: BLE001
+        bitrate_bps = None
+
     try:
         left_cam, left_res = setup_camera(0, left_profile, args.framerate)
         right_cam, right_res = setup_camera(1, right_profile, args.framerate)
@@ -189,7 +216,13 @@ def main() -> None:
 
             if ffmpeg_proc is None:
                 combined_height, combined_width = combined.shape[:2]
-                ffmpeg_proc = spawn_ffmpeg(combined_width, combined_height, args.framerate, args.endpoint)
+                ffmpeg_proc = spawn_ffmpeg(
+                    combined_width,
+                    combined_height,
+                    args.framerate,
+                    args.endpoint,
+                    bitrate_bps,
+                )
                 if ffmpeg_proc.stdin is None:
                     raise RuntimeError("Failed to create ffmpeg stdin pipe.")
 

@@ -78,6 +78,8 @@ OUT_ROOT=test-output make capture-left  # store captures under test-output/...
 - **Latency instrumentation** – Add a monotonic `sent_at` timestamp to the WebRTC data channel and render a small HUD in the WebXR client so you can read end-to-end latency and fps directly inside the Quest once the proxy is removed.
 - **Latency tuning ideas** – Prefer a hard link (Quest Link/Air Link via Ethernet PC or USB-C tether) or a dedicated Wi-Fi 6 AP near the Pi; if you stay on Wi-Fi, lock to 5 GHz, disable power save with `iw wlan0 set power_save off`, and use low-latency encoder settings (H.264 baseline, IDR every frame, shallow queues).
 - **SSL without ngrok** – Follow the flow outlined in [this Node-RED forum thread](https://discourse.nodered.org/t/setup-of-https-ssl-local-webxr-quest-development/96224) (mirrored below) to self-host HTTPS: mint a local CA, trust it on the Quest, then run `make stream-webrtc ARGS="... --cert certs/dev-server.crt --key certs/dev-server.key"` so WebRTC can stay entirely on your LAN.
+- **Video bitrate** – Use the calibration UI’s bitrate slider to set the per-eye target (stored as `bitrate_mbps`); the WebRTC server enforces the same cap on its sender, and `stream-cast` passes it to ffmpeg as `-b:v/-maxrate/-bufsize` so 2 K previews stay crisp.
+- **Codec sanity check** – If the browser still looks blocky, open `chrome://webrtc-internals` and confirm the negotiated video codec is `H264` and the outbound bitrate matches your calibration slider. The server prefers H.264 automatically and will log a warning if the client only offers VP8.
 - **Color & white balance** – The calibration UI now includes an auto white balance toggle, AWB mode selector (try `incandescent`/`tungsten` for warmer scenes), and manual red/blue gains; capture a gray card to lock gains, then revisit LUT/CCM adjustments if a blue shift remains.
 - **Printing this guide** – Use `lp README.md` (or `lp -o landscape README.md`) to send the file to the default printer, or generate a PDF first via `pandoc README.md -o rpi-vr-camera.pdf` and print that artifact.
 
@@ -143,7 +145,7 @@ Launch the desktop calibration tool to visualise both camera streams side by sid
 make calibration-ui
 ```
 
-- Rotation, horizontal/vertical flips, sensor resolution, crop size, XY offsets, and white balance controls update the preview immediately.
+- Rotation, horizontal/vertical flips, sensor resolution, crop size, XY offsets, white balance, and target encoder bitrate update the preview immediately.
 - Press **Save Calibration** to write the values back into `config/camera_profiles.yaml`; subsequent scripts (capture, streaming) will pick up the new defaults.
 - Close the window to release both cameras before running other capture commands.
 - After saving, try `make stream-preview` or `make stream-cast` to confirm stereo alignment in real time.

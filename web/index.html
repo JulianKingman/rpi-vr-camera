@@ -71,6 +71,9 @@
     </div>
     <video id="video" playsinline autoplay muted></video>
     <canvas id="xrCanvas" style="display:none"></canvas>
+    <div id="stats">
+      <span id="fpsLabel"></span>
+    </div>
     <pre id="status"></pre>
 
     <script>
@@ -79,6 +82,7 @@
       const enterVrButton = document.getElementById("enterVrButton");
       const video = document.getElementById("video");
       const statusEl = document.getElementById("status");
+      const fpsLabel = document.getElementById("fpsLabel");
       const xrCanvas = document.getElementById("xrCanvas");
       const caSection = document.getElementById("caSection");
 
@@ -111,6 +115,21 @@
       function log(message) {
         statusEl.textContent = message;
       }
+
+      let frameCounter = 0;
+      let lastFpsUpdate = performance.now();
+      function monitorFps() {
+        frameCounter += 1;
+        const now = performance.now();
+        if (now - lastFpsUpdate >= 1000) {
+          const fps = (frameCounter * 1000) / (now - lastFpsUpdate);
+          fpsLabel.textContent = `Approx FPS: ${fps.toFixed(1)}`;
+          frameCounter = 0;
+          lastFpsUpdate = now;
+        }
+        requestAnimationFrame(monitorFps);
+      }
+      requestAnimationFrame(monitorFps);
 
       async function stopStream(message) {
         stopButton.disabled = true;

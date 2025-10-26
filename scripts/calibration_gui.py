@@ -83,6 +83,7 @@ class CameraPanel(QWidget):
         gains = profile.get("colour_gains", [1.0, 1.0])
         self.red_gain = float(gains[0]) if len(gains) > 0 else 1.0
         self.blue_gain = float(gains[1]) if len(gains) > 1 else 1.0
+        self.bitrate_mbps = float(profile.get("bitrate_mbps", 40.0))
 
         config = self.picam.create_video_configuration(
             main={"size": self.source_resolution},
@@ -138,6 +139,14 @@ class CameraPanel(QWidget):
         self.blue_gain_spin.setValue(self.blue_gain)
         self.blue_gain_spin.valueChanged.connect(self.on_gain_changed)
 
+        self.bitrate_spin = QDoubleSpinBox()
+        self.bitrate_spin.setRange(5.0, 150.0)
+        self.bitrate_spin.setSingleStep(1.0)
+        self.bitrate_spin.setDecimals(1)
+        self.bitrate_spin.setSuffix(" Mbps")
+        self.bitrate_spin.setValue(self.bitrate_mbps)
+        self.bitrate_spin.valueChanged.connect(self.on_bitrate_changed)
+
         self.crop_w_spin = QSpinBox()
         self.crop_w_spin.setRange(64, self.source_resolution[0])
         self.crop_w_spin.setValue(self.crop_width)
@@ -172,14 +181,16 @@ class CameraPanel(QWidget):
         controls_layout.addWidget(self.red_gain_spin, 6, 1)
         controls_layout.addWidget(QLabel("Blue Gain"), 7, 0)
         controls_layout.addWidget(self.blue_gain_spin, 7, 1)
-        controls_layout.addWidget(QLabel("Crop W"), 8, 0)
-        controls_layout.addWidget(self.crop_w_spin, 8, 1)
-        controls_layout.addWidget(QLabel("Crop H"), 9, 0)
-        controls_layout.addWidget(self.crop_h_spin, 9, 1)
-        controls_layout.addWidget(QLabel("Offset X"), 10, 0)
-        controls_layout.addWidget(self.offset_x_spin, 10, 1)
-        controls_layout.addWidget(QLabel("Offset Y"), 11, 0)
-        controls_layout.addWidget(self.offset_y_spin, 11, 1)
+        controls_layout.addWidget(QLabel("Bitrate"), 8, 0)
+        controls_layout.addWidget(self.bitrate_spin, 8, 1)
+        controls_layout.addWidget(QLabel("Crop W"), 9, 0)
+        controls_layout.addWidget(self.crop_w_spin, 9, 1)
+        controls_layout.addWidget(QLabel("Crop H"), 10, 0)
+        controls_layout.addWidget(self.crop_h_spin, 10, 1)
+        controls_layout.addWidget(QLabel("Offset X"), 11, 0)
+        controls_layout.addWidget(self.offset_x_spin, 11, 1)
+        controls_layout.addWidget(QLabel("Offset Y"), 12, 0)
+        controls_layout.addWidget(self.offset_y_spin, 12, 1)
 
         group = QGroupBox(f"Camera {camera_index} ({profile_key})")
         group_layout = QVBoxLayout(group)
@@ -261,6 +272,9 @@ class CameraPanel(QWidget):
         self.red_gain_spin.setEnabled(manual)
         self.blue_gain_spin.setEnabled(manual)
         self.awb_mode_combo.setEnabled(self.awb_enable)
+
+    def on_bitrate_changed(self, value: float) -> None:
+        self.bitrate_mbps = float(value)
 
     def on_gain_changed(self, _value: float) -> None:
         self.red_gain = self.red_gain_spin.value()
@@ -407,6 +421,7 @@ class CameraPanel(QWidget):
                 float(self.red_gain_spin.value()),
                 float(self.blue_gain_spin.value()),
             ],
+            "bitrate_mbps": float(self.bitrate_spin.value()),
         }
 
 
