@@ -24,7 +24,7 @@ CAPTURE_TIMEOUT := --timeout $(TIMEOUT)
 CAPTURE_KEYPRESS := $(if $(filter 0,$(KEYPRESS)),,--keypress)
 SETPTS_EXPR := N/($(FRAMERATE)*TB)
 
-.PHONY: help system-deps python-deps preview capture capture-left capture-right convert convert-left convert-right capture-stereo calibration-ui stream-preview stream-cast stream-webrtc tls-certs
+.PHONY: help system-deps python-deps preview capture capture-left capture-right convert convert-left convert-right capture-stereo calibration-ui stream-preview stream-cast stream-webrtc stream-webrtc-gst prompt-test tls-certs
 
 help:
 	@echo "Available targets:"
@@ -36,6 +36,7 @@ help:
 	@echo "  make stream-preview   # live side-by-side stereo preview (Picamera2)"
 	@echo "  make stream-cast      # preview + network cast via ffmpeg"
 	@echo "  make stream-webrtc    # launch WebRTC/WebXR server (requires browser client)"
+	@echo "  make stream-webrtc-gst # launch GStreamer-based WebRTC pipeline (option 3 prototype)"
 	@echo "  make tls-certs        # interactive helper for HTTPS certificates"
 	@echo "Variables: CAMERA, RESOLUTION, PREVIEW, METADATA, FRAMERATE, WIDTH, HEIGHT, OUTPUT, PTS"
 
@@ -150,6 +151,25 @@ stream-webrtc:
 		exit 1; \
 	fi
 	. .venv/bin/activate && python scripts/webrtc_stream.py $(ARGS)
+
+DEFAULT_GST_HOST ?= 0.0.0.0
+DEFAULT_GST_PORT ?= 8443
+DEFAULT_GST_FRAMERATE ?= 72
+DEFAULT_GST_STUN ?= stun://stun.l.google.com:19302
+
+GST_ARGS = --host $(DEFAULT_GST_HOST) --port $(DEFAULT_GST_PORT) --framerate $(DEFAULT_GST_FRAMERATE) --stun $(DEFAULT_GST_STUN)
+
+stream-webrtc-gst:
+	@scripts/check_cameras.sh || exit $$?
+	@if [ ! -x .venv/bin/python3 ]; then \
+		echo "Virtualenv missing. Run 'make python-deps' first."; \
+		exit 1; \
+	fi
+	. .venv/bin/activate && python scripts/webrtc_gstreamer.py $(GST_ARGS)
+
+prompt-test:
+	@echo "Running prompt test Makefile target..."
+	@scripts/prompt_test.sh
 
 tls-certs:
 	$(PYTHON) scripts/generate_tls_certs.py

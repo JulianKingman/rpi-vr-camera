@@ -20,8 +20,16 @@
         padding: 16px;
         text-align: center;
       }
-      video {
-        max-width: 90vw;
+      .preview {
+        display: flex;
+        gap: 12px;
+        justify-content: center;
+        flex-wrap: wrap;
+        width: 100%;
+      }
+      .preview video {
+        max-width: 42vw;
+        min-width: 280px;
         background: #000;
       }
       .controls {
@@ -69,7 +77,10 @@
       <button id="stopButton" disabled>Stop</button>
       <button id="enterVrButton" disabled>Enter VR</button>
     </div>
-    <video id="video" playsinline autoplay muted></video>
+    <div class="preview">
+      <video id="leftVideo" playsinline autoplay muted></video>
+      <video id="rightVideo" playsinline autoplay muted style="display:none;"></video>
+    </div>
     <canvas id="xrCanvas" style="display:none"></canvas>
     <div id="stats">
       <span id="fpsLabel"></span>
@@ -80,7 +91,8 @@
       const startButton = document.getElementById("startButton");
       const stopButton = document.getElementById("stopButton");
       const enterVrButton = document.getElementById("enterVrButton");
-      const video = document.getElementById("video");
+      const leftVideo = document.getElementById("leftVideo");
+      const rightVideo = document.getElementById("rightVideo");
       const statusEl = document.getElementById("status");
       const fpsLabel = document.getElementById("fpsLabel");
       const xrCanvas = document.getElementById("xrCanvas");
@@ -102,15 +114,16 @@
       let gl = null;
       let xrSession = null;
       let xrRefSpace = null;
-      let videoTexture = null;
+      let leftTexture = null;
+      let rightTexture = null;
       let shaderProgram = null;
       let positionBuffer = null;
       let texcoordBuffer = null;
       let attribPosition = null;
       let attribTexCoord = null;
-      let uniformTexOffset = null;
-      let uniformTexScale = null;
       let uniformTexture = null;
+      let leftStream = null;
+      let rightStream = null;
 
       function log(message) {
         statusEl.textContent = message;
@@ -127,14 +140,43 @@
           frameCounter = 0;
           lastFpsUpdate = now;
         }
-        requestAnimationFrame(monitorFps);
-      }
       requestAnimationFrame(monitorFps);
+    }
+    requestAnimationFrame(monitorFps);
 
-      async function stopStream(message) {
-        stopButton.disabled = true;
-        startButton.disabled = false;
-        enterVrButton.disabled = true;
+    let statsTimer = null;
+
+    function monitorConnection(connection) {
+      if (statsTimer) {
+        clearInterval(statsTimer);
+      }
+      statsTimer = setInterval(async () => {
+        if (!connection) {
+          return;
+        }
+        try {
+          const stats = await connection.getStats();
+          let videoStats = [];
+          stats.forEach((report) => {
+            if (report.type === "inbound-rtp" && report.kind === "video") {
+              videoStats.push(
+                `mid=${report.mid || "?"} frames=${report.framesDecoded || 0} bytes=${report.bytesReceived || 0}`
+              );
+            }
+          });
+          if (videoStats.length) {
+            log(`Video stats: ${videoStats.join(" | ")}`);
+          }
+        } catch (err) {
+          console.warn("getStats failed", err);
+        }
+      }, 1000);
+    }
+
+    async function stopStream(message) {
+      stopButton.disabled = true;
+      startButton.disabled = false;
+      enterVrButton.disabled = true;
 
         if (xrSession) {
           try {
@@ -152,7 +194,18 @@
           pc = null;
         }
 
-        video.srcObject = null;
+        if (leftStream) {
+          leftStream.getTracks().forEach((track) => track.stop());
+        }
+        if (rightStream) {
+          rightStream.getTracks().forEach((track) => track.stop());
+        }
+        leftStream = null;
+        rightStream = null;
+
+        leftVideo.srcObject = null;
+        rightVideo.srcObject = null;
+        rightVideo.style.display = "none";
         log(message || "Stream stopped.");
       }
 
@@ -161,13 +214,60 @@
         stopButton.disabled = false;
         log("Starting WebRTC negotiation…");
 
+        leftStream = null;
+        rightStream = null;
+        leftVideo.srcObject = null;
+        rightVideo.srcObject = null;
+        rightVideo.style.display = "none";
+
         pc = new RTCPeerConnection({
           iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }],
         });
 
         pc.addEventListener("track", (event) => {
-          video.srcObject = event.streams[0];
-          video.play().catch(() => {});
+          console.log("track event", event.track.kind, event.track.id, event.streams);
+          if (event.track.kind !== "video") {
+            return;
+          }
+          const stream = event.streams[0] || new MediaStream([event.track]);
+          if (!leftStream) {
+            leftStream = stream;
+            leftVideo.srcObject = leftStream;
+            leftVideo.play().catch((err) => console.warn("left play() failed", err));
+            log(`Left track ${event.track.id} attached.`);
+          } else if (!rightStream) {
+            rightStream = stream;
+            rightVideo.srcObject = rightStream;
+            rightVideo.style.display = "block";
+            rightVideo.play().catch((err) => console.warn("right play() failed", err));
+            log(`Right track ${event.track.id} attached.`);
+          } else {
+            rightStream.getTracks().forEach((track) => track.stop());
+            rightStream = stream;
+            rightVideo.srcObject = rightStream;
+            rightVideo.style.display = "block";
+            rightVideo.play().catch((err) => console.warn("right play() failed", err));
+            log(`Replaced extra track with ${event.track.id}.`);
+          }
+
+          event.track.addEventListener("unmute", () => {
+            console.log("track unmute", event.track.id);
+          });
+          event.track.addEventListener("mute", () => {
+            console.log("track mute", event.track.id);
+          });
+          event.track.addEventListener("ended", () => {
+            console.log("track ended", event.track.id);
+            if (leftStream && leftStream.getTracks().includes(event.track)) {
+              leftStream = null;
+              leftVideo.srcObject = null;
+            }
+            if (rightStream && rightStream.getTracks().includes(event.track)) {
+              rightStream = null;
+              rightVideo.srcObject = null;
+              rightVideo.style.display = "none";
+            }
+          });
         });
 
         pc.addEventListener("connectionstatechange", () => {
@@ -178,10 +278,12 @@
         });
 
         pc.addTransceiver("video", { direction: "recvonly" });
+        pc.addTransceiver("video", { direction: "recvonly" });
         pc.addTransceiver("audio", { direction: "recvonly" });
 
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
+        monitorConnection(pc);
 
         const fail = async (message) => {
           await stopStream(message);
@@ -232,11 +334,9 @@
           attribute vec2 aPosition;
           attribute vec2 aTexCoord;
           varying vec2 vTexCoord;
-          uniform vec2 uTexOffset;
-          uniform vec2 uTexScale;
           void main() {
             gl_Position = vec4(aPosition, 0.0, 1.0);
-            vTexCoord = uTexOffset + aTexCoord * uTexScale;
+            vTexCoord = aTexCoord;
           }
         `;
 
@@ -312,18 +412,23 @@
         gl.enableVertexAttribArray(attribTexCoord);
         gl.vertexAttribPointer(attribTexCoord, 2, gl.FLOAT, false, 0, 0);
 
-        uniformTexOffset = gl.getUniformLocation(shaderProgram, "uTexOffset");
-        uniformTexScale = gl.getUniformLocation(shaderProgram, "uTexScale");
         uniformTexture = gl.getUniformLocation(shaderProgram, "uTexture");
         gl.uniform1i(uniformTexture, 0);
+        gl.activeTexture(gl.TEXTURE0);
 
-        videoTexture = gl.createTexture();
-        gl.bindTexture(gl.TEXTURE_2D, videoTexture);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, 2, 2, 0, gl.RGB, gl.UNSIGNED_BYTE, null);
+        const createTexture = () => {
+          const texture = gl.createTexture();
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, 2, 2, 0, gl.RGB, gl.UNSIGNED_BYTE, null);
+          return texture;
+        };
+
+        leftTexture = createTexture();
+        rightTexture = createTexture();
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
 
         gl.clearColor(0, 0, 0, 1);
@@ -385,9 +490,16 @@
         const layer = xrSession.renderState.baseLayer;
         gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
 
-        if (video.readyState >= video.HAVE_CURRENT_DATA) {
-          gl.bindTexture(gl.TEXTURE_2D, videoTexture);
-          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, video);
+        const updateTextureFromVideo = (texture, videoElement) => {
+          if (videoElement && videoElement.readyState >= videoElement.HAVE_CURRENT_DATA) {
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, videoElement);
+          }
+        };
+
+        updateTextureFromVideo(leftTexture, leftVideo);
+        if (rightStream) {
+          updateTextureFromVideo(rightTexture, rightVideo);
         }
 
         gl.clear(gl.COLOR_BUFFER_BIT);
@@ -398,12 +510,13 @@
         gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
         gl.vertexAttribPointer(attribTexCoord, 2, gl.FLOAT, false, 0, 0);
 
-        for (const view of pose.views) {
+        for (let i = 0; i < pose.views.length; i += 1) {
+          const view = pose.views[i];
           const viewport = layer.getViewport(view);
           gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
-          const isLeft = view.eye === "left";
-          gl.uniform2f(uniformTexOffset, isLeft ? 0.0 : 0.5, 0.0);
-          gl.uniform2f(uniformTexScale, 0.5, 1.0);
+          const useRight = (view.eye && view.eye.toLowerCase() === "right") || i === 1;
+          const texture = useRight && rightStream ? rightTexture : leftTexture;
+          gl.bindTexture(gl.TEXTURE_2D, texture);
           gl.drawArrays(gl.TRIANGLES, 0, 6);
         }
 

@@ -69,7 +69,7 @@ OUT_ROOT=test-output make capture-left  # store captures under test-output/...
 - Add `PREVIEW=drm` to the preview target when running on a Wayland desktop to see the live feed.
 - Run `make stream-preview` for a live side-by-side window honouring the current calibration; use `--headless` if no GUI is available.
 - Run `make stream-cast ARGS="--endpoint udp://host:port"` to preview locally while ffmpeg multicasts the combined feed.
-- Run `make stream-webrtc ARGS="--host 0.0.0.0 --port 8443"` and open `https://<pi-ip>:8443/` in a WebRTC-capable browser (Quest, desktop) to view the stream. Once connected, hit **Enter VR** to split the feed per eye inside the headset.
+- Run `make stream-webrtc ARGS="--host 0.0.0.0 --port 8443"` and open `https://<pi-ip>:8443/` in a WebRTC-capable browser (Quest, desktop) to view the stream. The page now negotiates independent left/right hardware-encoded tracks; use **Enter VR** to bind each eye to its dedicated stream.
 - Pass `--resolution WIDTHxHEIGHT` (for example, `--resolution 4056x3040`) inside `ARGS` to exercise other sensor modes without editing the config file. The override applies to both cameras for the current run.
 - Run `make calibration-ui` for a live Qt preview where you can tweak rotation, flips, crops, and offsets (writes back to `config/camera_profiles.yaml`).
 - Captures land under `capture-output/<left|right>/<YYYYMMDD_HHMMSS>` with raw `.h264`, matching `.mp4`, and `.pts`; override the base folder via `OUT_ROOT=...`.
@@ -200,7 +200,7 @@ rpicam-vid --camera 1 --framerate 56 --width 2304 --height 1296 \
    - Evaluate `OpenCV CUDA` vs `Vulkan` vs shader-based pipeline for Pi 5 VideoCore VII.
    - Output VR-ready frame packing standard (initially side-by-side 1:1, expand to OpenXR-compliant format).
 5. **WebRTC transport**
-   - Current prototype: `make stream-webrtc` (aiortc + WebRTC) serves `web/index.html` so any WebRTC-capable browser can subscribe to the combined feed.
+  - Current prototype: `make stream-webrtc` (aiortc + WebRTC) serves `web/index.html` delivering dual hardware-encoded left/right tracks to WebXR clients.
    - Next: integrate OpenXR/WebXR-specific rendering (split textures per eye, apply headset-specific transforms, handle controller input).
    - Longer term: add adaptive bitrate / dynamic framerate controls and migrate the encode path to the Pi hardware encoder pipeline.
 6. **Performance tuning & validation**
