@@ -149,6 +149,37 @@ def _list_camera_processes() -> list[tuple[int, str]]:
     return processes
 
 
+def _kill_process_with_escalation(pid: int, sig: int = signal.SIGTERM) -> bool:
+    """Kill process with automatic privilege escalation if needed."""
+    # Try direct kill first
+    try:
+        os.kill(pid, sig)
+        return True
+    except ProcessLookupError:
+        return True  # Process already gone
+    except PermissionError:
+        pass  # Fall through to subprocess-based kill
+    # Fallback: use kill command (may work for same-user processes)
+    result = subprocess.run(
+        ["kill", f"-{sig}", str(pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return True
+    # Final fallback: try sudo kill
+    sudo_result = subprocess.run(
+        ["sudo", "kill", f"-{sig}", str(pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if sudo_result.returncode == 0:
+        return True
+    return False
+
+
 def _prompt_kill_process(pid: int, cmd: str) -> bool:
     prompt = f"Terminate PID {pid} ({cmd}) holding camera device? [y/N]: "
     response: str | None = None
@@ -169,24 +200,43 @@ def _prompt_kill_process(pid: int, cmd: str) -> bool:
         return False
     if response.strip().lower() not in {"y", "yes"}:
         return False
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return True
-    except PermissionError:
-        logging.error("Insufficient permissions to kill PID %s (%s)", pid, cmd)
+    if not _kill_process_with_escalation(pid, signal.SIGTERM):
+        logging.error("Failed to kill PID %s (%s) with SIGTERM", pid, cmd)
         return False
+    # Wait briefly, then try SIGKILL if still alive
+    time.sleep(0.5)
+    try:
+        os.kill(pid, 0)  # Check if process still exists
+        logging.warning("PID %s still alive after SIGTERM; sending SIGKILL", pid)
+        if not _kill_process_with_escalation(pid, signal.SIGKILL):
+            logging.error("Failed to kill PID %s (%s) with SIGKILL", pid, cmd)
+            return False
+    except ProcessLookupError:
+        pass  # Process is gone
+    except PermissionError:
+        # Try once more with SIGKILL via escalation
+        if not _kill_process_with_escalation(pid, signal.SIGKILL):
+            logging.error("Failed to kill PID %s (%s) with SIGKILL after escalation", pid, cmd)
+            return False
     return True
 
 
 def _kill_process(pid: int, cmd: str) -> bool:
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
+    if not _kill_process_with_escalation(pid, signal.SIGTERM):
+        logging.warning("Failed to kill PID %s (%s) with SIGTERM, trying SIGKILL", pid, cmd)
+        if not _kill_process_with_escalation(pid, signal.SIGKILL):
+            logging.error("Failed to kill PID %s (%s) even with SIGKILL", pid, cmd)
+            return False
         return True
-    except PermissionError:
-        logging.error("Insufficient permissions to kill PID %s (%s)", pid, cmd)
-        return False
+    # Wait briefly, then verify process is gone or send SIGKILL
+    time.sleep(0.5)
+    try:
+        os.kill(pid, 0)  # Check if process still exists
+        logging.debug("PID %s still alive after SIGTERM; sending SIGKILL", pid)
+        if not _kill_process_with_escalation(pid, signal.SIGKILL):
+            return False
+    except (ProcessLookupError, PermissionError):
+        pass  # Process is gone or we can't check it
     return True
 
 

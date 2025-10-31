@@ -13,11 +13,21 @@ Low-latency stereo camera capture and VR streaming pipeline tuned for Raspberry 
 - Enable libcamera stack (`sudo raspi-config nonint do_camera 0`) and reboot.
 
 ## Development Dependencies
+
+### On Raspberry Pi:
 - Build essentials, git, cmake/meson as needed.
 - `libcamera`, `libcamera-apps`, `gstreamer1.0-*` (including `gstreamer1.0-libav`, `gstreamer1.0-tools`, `gstreamer1.0-plugins-{good,bad}`).
 - Python 3.11+ with `aiortc`, `opencv-python`, `numpy`, `picamera2` for rapid prototyping.
 - Optional: `nv12` aware viewers (e.g. `ffplay`, `gst-launch-1.0` on a development laptop) for debugging streams.
+
+### On macOS (Development/Testing):
+- Python 3.11+ with `aiortc`, `opencv-python`, `numpy`, `pyyaml` (no `picamera2` needed).
+- Optional: `ffmpeg` via Homebrew for video conversion.
+- See [docs/mac_installation.md](docs/mac_installation.md) for complete Mac setup instructions.
+
 ## Installing Dependencies
+
+### Raspberry Pi:
 All commands assume Raspberry Pi OS Bookworm 64-bit on a Pi 5.
 
 ```bash
@@ -33,11 +43,33 @@ sudo apt install -y \
   ffmpeg
 
 # Python environment (use a venv to avoid polluting system packages)
+make python-deps  # or manually: see below
+```
+
+Or manually:
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip wheel
 pip install aiortc aiohttp opencv-python numpy picamera2 pyyaml PySide6
 ```
+
+### macOS:
+```bash
+# Python environment only (no system packages needed)
+make python-deps  # Automatically skips RPI-only packages
+```
+
+Or manually:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate  # or: source .venv/bin/activate.fish (for Fish shell)
+pip install --upgrade pip wheel
+pip install aiortc aiohttp opencv-python numpy pyyaml PySide6
+# Note: picamera2 is RPI-only and not needed on Mac
+```
+
+For detailed Mac setup, see [docs/mac_installation.md](docs/mac_installation.md).
 
 - The `make python-deps` helper writes the `.pth` link automatically; if you ever recreate the venv manually, run `echo '/usr/lib/python3/dist-packages' >> .venv/lib/python3.*/site-packages/rpi_libcamera.pth`.
 - If `aiortc` build fails, install the extra headers: `sudo apt install libssl-dev libffi-dev`.
