@@ -23,32 +23,24 @@ from aiortc import AudioStreamTrack, MediaStreamTrack, RTCPeerConnection, RTCSes
 from aiortc.mediastreams import MediaStreamError
 from av.packet import Packet
 from av import AudioFrame
-from picamera2 import Picamera2
-from picamera2.encoders import H264Encoder
-from picamera2.outputs import Output
+
+# Try importing picamera2 for RPI (optional on Mac)
+try:
+    from picamera2 import Picamera2
+    from picamera2.encoders import H264Encoder
+    from picamera2.outputs import Output
+
+    PICAMERA2_AVAILABLE = True
+except ImportError:
+    PICAMERA2_AVAILABLE = False
+    Picamera2 = None  # type: ignore[assignment, misc]
+    H264Encoder = None  # type: ignore[assignment, misc]
+    Output = None  # type: ignore[assignment, misc]
 
 from cam_utils import build_transform, resolve_awb_mode
 from aiortc.codecs import h264 as h264_codecs
 
-_H264_PATCHED = False
-_H264_TARGET_BITRATE: Optional[int] = None
 MICROSECOND_TIME_BASE = Fraction(1, 1_000_000)
-
-
-def _ensure_h264_encoder_patch(target_bitrate: int) -> None:
-    global _H264_PATCHED
-    global _H264_TARGET_BITRATE
-    _H264_TARGET_BITRATE = target_bitrate
-    if not _H264_PATCHED:
-        original_init = h264_codecs.H264Encoder.__init__
-
-        def patched_init(self, *args, **kwargs):
-            original_init(self, *args, **kwargs)
-            if hasattr(self, "target_bitrate") and _H264_TARGET_BITRATE:
-                self.target_bitrate = _H264_TARGET_BITRATE
-
-        h264_codecs.H264Encoder.__init__ = patched_init  # type: ignore[assignment]
-        _H264_PATCHED = True
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "camera_profiles.yaml"
 STATIC_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -84,6 +76,19 @@ class EncodedSample:
     keyframe: bool = False
 
 
+class SharedEpoch:
+    """Shared PTS origin so both cameras' timestamps are aligned."""
+    def __init__(self):
+        self._epoch: Optional[int] = None
+        self._lock = Lock()
+
+    def relativize(self, pts: int) -> int:
+        with self._lock:
+            if self._epoch is None:
+                self._epoch = pts
+            return max(0, pts - self._epoch)
+
+
 @dataclass
 class EncodedStreamSubscription:
     identifier: int
@@ -97,12 +102,13 @@ class EncodedStreamSubscription:
 class EncodedStreamBroadcaster:
     """Fan-out helper so multiple WebRTC tracks can tap encoded frames."""
 
-    def __init__(self, loop: asyncio.AbstractEventLoop, max_queue: int = 8):
+    def __init__(self, loop: asyncio.AbstractEventLoop, max_queue: int = 3):
         self._loop = loop
         self._max_queue = max_queue
         self._lock = Lock()
         self._next_identifier = 0
         self._subscribers: Dict[int, asyncio.Queue[Optional[EncodedSample]]] = {}
+        self._drop_count = 0
 
     def subscribe(self) -> EncodedStreamSubscription:
         queue: asyncio.Queue[Optional[EncodedSample]] = asyncio.Queue(maxsize=self._max_queue)
@@ -125,14 +131,18 @@ class EncodedStreamBroadcaster:
             for key, queue in list(self._subscribers.items()):
                 try:
                     try:
-                        while True:
-                            queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        pass
-                    try:
                         queue.put_nowait(sample)
                     except asyncio.QueueFull:
-                        continue
+                        try:
+                            queue.get_nowait()  # drop oldest
+                        except asyncio.QueueEmpty:
+                            pass
+                        self._drop_count += 1
+                        print(f"[WARN] Broadcaster dropped frame (total: {self._drop_count})", flush=True)
+                        try:
+                            queue.put_nowait(sample)
+                        except asyncio.QueueFull:
+                            pass
                 except RuntimeError:
                     dead_keys.append(key)
             if dead_keys:
@@ -142,15 +152,16 @@ class EncodedStreamBroadcaster:
         self._loop.call_soon_threadsafe(_dispatch)
 
 
-class HardwareEncoderOutput(Output):
+class HardwareEncoderOutput(Output if Output is not None else object):
     """Picamera2 Output that forwards hardware encoded NAL units into asyncio queues."""
 
-    def __init__(self, loop: asyncio.AbstractEventLoop, broadcaster: EncodedStreamBroadcaster, name: str):
-        super().__init__()
+    def __init__(self, loop: asyncio.AbstractEventLoop, broadcaster: EncodedStreamBroadcaster, name: str, shared_epoch: SharedEpoch):
+        if Output is not None:
+            super().__init__()
         self._loop = loop
         self._broadcaster = broadcaster
         self._name = name
-        self._base_pts: Optional[int] = None
+        self._shared_epoch = shared_epoch
 
     def outputframe(self, frame, keyframe: bool = True, timestamp: Optional[int] = None, packet=None, audio: bool = False):
         if audio or not self.recording:
@@ -169,11 +180,10 @@ class HardwareEncoderOutput(Output):
             time_base = MICROSECOND_TIME_BASE
 
         if pts is None:
-            pts = int(time.monotonic_ns() // 1000)
+            print(f"[ERROR] {self._name}: frame has no timestamp, skipping", file=sys.stderr, flush=True)
+            return
 
-        if self._base_pts is None:
-            self._base_pts = pts
-        relative_pts = max(0, int(pts - self._base_pts))
+        relative_pts = self._shared_epoch.relativize(pts)
 
         sample = EncodedSample(
             data=data_bytes,
@@ -184,7 +194,8 @@ class HardwareEncoderOutput(Output):
         if keyframe:
             print(f"[DEBUG] {self._name} keyframe {relative_pts}", flush=True)
         self._broadcaster.publish(sample)
-        self.outputtimestamp(pts)
+        if Output is not None and hasattr(self, 'outputtimestamp'):
+            self.outputtimestamp(pts)
 
 
 class HardwareVideoTrack(MediaStreamTrack):
@@ -261,7 +272,13 @@ class HardwareEncoderCamera:
         framerate: int,
         loop: asyncio.AbstractEventLoop,
         description: str,
+        shared_epoch: SharedEpoch,
     ):
+        if not PICAMERA2_AVAILABLE or Picamera2 is None:
+            raise RuntimeError(
+                "HardwareEncoderCamera requires picamera2 (RPI only). "
+                "This script uses hardware H.264 encoding. For Mac testing, use test patterns or modify the script."
+            )
         self.index = index
         self.profile = copy.deepcopy(profile)
         self.loop = loop
@@ -308,7 +325,6 @@ class HardwareEncoderCamera:
         if self.bitrate_bps:
             h264_codecs.MAX_BITRATE = max(h264_codecs.MAX_BITRATE, self.bitrate_bps)
             h264_codecs.DEFAULT_BITRATE = max(h264_codecs.DEFAULT_BITRATE, self.bitrate_bps)
-            _ensure_h264_encoder_patch(self.bitrate_bps)
 
         iperiod_config = self.profile.get("gop_frames", max(1, int(target_rate)))
         try:
@@ -324,6 +340,12 @@ class HardwareEncoderCamera:
             qp = int(qp_value) if qp_value is not None else None
         except Exception:  # noqa: BLE001
             qp = None
+        if not PICAMERA2_AVAILABLE or H264Encoder is None:
+            raise RuntimeError(
+                "Hardware encoding requires picamera2 (RPI only). "
+                "Use camera adapter mode (CAMERA_MODE=test or CAMERA_MODE=opencv) for Mac testing."
+            )
+
         repeat_headers = bool(self.profile.get("repeat_headers", True))
         profile_name = self.profile.get("h264_profile", "high")
         self.encoder = H264Encoder(
@@ -334,7 +356,7 @@ class HardwareEncoderCamera:
             qp=qp,
             repeat=repeat_headers,
         )
-        self.output = HardwareEncoderOutput(loop, self.broadcaster, description)
+        self.output = HardwareEncoderOutput(loop, self.broadcaster, description, shared_epoch)
 
         try:
             self.camera.start_recording(self.encoder, self.output)
@@ -418,9 +440,10 @@ class StereoHardwareCapture:
         self.left: HardwareEncoderCamera | None = None
         self.right: HardwareEncoderCamera | None = None
 
+        shared_epoch = SharedEpoch()
         try:
-            self.left = HardwareEncoderCamera(0, left_profile, framerate, loop, description="left")
-            self.right = HardwareEncoderCamera(1, right_profile, framerate, loop, description="right")
+            self.left = HardwareEncoderCamera(0, left_profile, framerate, loop, description="left", shared_epoch=shared_epoch)
+            self.right = HardwareEncoderCamera(1, right_profile, framerate, loop, description="right", shared_epoch=shared_epoch)
         except Exception:
             if self.left is not None:
                 self.left.stop()
@@ -473,6 +496,28 @@ class WebRTCServer:
         params = await request.json()
         pc = RTCPeerConnection()
         self.pcs.add(pc)
+
+        self._stats_channel = None
+
+        @pc.on("datachannel")
+        def on_datachannel(channel) -> None:
+            self._stats_channel = channel
+            # HUD instrumentation channel (RTT ping). Minimal ping/pong protocol.
+            @channel.on("message")
+            def on_message(message) -> None:
+                if not isinstance(message, str):
+                    return
+                try:
+                    payload = json.loads(message)
+                except Exception:  # noqa: BLE001
+                    return
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("type") == "ping"
+                    and isinstance(payload.get("seq"), int)
+                    and isinstance(payload.get("t"), (int, float))
+                ):
+                    channel.send(json.dumps({"type": "pong", "seq": payload["seq"], "t": payload["t"]}))
 
         offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
         try:
@@ -585,20 +630,39 @@ class WebRTCServer:
             try:
                 while pc.connectionState not in {"failed", "closed"}:
                     stats = await pc.getStats()
+                    track_idx = 0
                     for report in stats.values():
                         if report.type == "outbound-rtp" and getattr(report, "kind", None) == "video":
+                            mid = getattr(report, "mid", None) or str(track_idx)
+                            bytes_sent = getattr(report, "bytesSent", 0)
+                            frames_sent = getattr(report, "framesSent", 0)
+                            key_frames_sent = getattr(report, "keyFramesSent", 0)
                             print(
-                                f"[STATS] mid={getattr(report, 'mid', '?')} "
-                                f"bytes={getattr(report, 'bytesSent', 0)} "
-                                f"frames={getattr(report, 'framesSent', 0)} "
-                                f"keyFrames={getattr(report, 'keyFramesSent', 0)}",
+                                f"[STATS] mid={mid} "
+                                f"bytes={bytes_sent} "
+                                f"frames={frames_sent} "
+                                f"keyFrames={key_frames_sent}",
                                 flush=True,
                             )
+                            if self._stats_channel and self._stats_channel.readyState == "open":
+                                drop_count = self.capture.left.broadcaster._drop_count + self.capture.right.broadcaster._drop_count
+                                try:
+                                    self._stats_channel.send(json.dumps({
+                                        "type": "server_stats",
+                                        "mid": mid,
+                                        "bytesSent": bytes_sent,
+                                        "framesSent": frames_sent,
+                                        "keyFramesSent": key_frames_sent,
+                                        "droppedFrames": drop_count,
+                                    }))
+                                except Exception:
+                                    pass
+                            track_idx += 1
                     await asyncio.sleep(1.0)
             except Exception as exc:  # noqa: BLE001
                 print(f"[WARN] stats logger stopped: {exc}", file=sys.stderr)
 
-        asyncio.ensure_future(log_sender_stats())
+        asyncio.create_task(log_sender_stats())
 
         return web.Response(
             content_type="application/json",
@@ -703,13 +767,8 @@ def main() -> None:
 
     app.on_shutdown.append(shutdown)
 
-    def handle_signal() -> None:
-        loop.create_task(app.shutdown())
-        loop.create_task(app.cleanup())
-        loop.stop()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, handle_signal)
+    # Signal handling is done via web.run_app() shutdown
+    # No manual signal handlers needed - aiohttp handles SIGINT/SIGTERM gracefully
 
     ssl_context = None
     if args.cert or args.key:

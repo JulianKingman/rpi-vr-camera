@@ -5,72 +5,233 @@
     <title>rpi-vr-camera WebXR/WebRTC Preview</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
+      * { box-sizing: border-box; }
       body {
         margin: 0;
         padding: 0;
-        font-family: Arial, sans-serif;
-        background: #111;
-        color: #eee;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        background: #0a0a0a;
+        color: #e0e0e0;
         display: flex;
         flex-direction: column;
         align-items: center;
-        gap: 16px;
+        min-height: 100vh;
       }
       header {
-        padding: 16px;
+        padding: 20px 24px 8px;
         text-align: center;
+        max-width: 720px;
       }
+      header h1 {
+        font-size: 20px;
+        font-weight: 600;
+        margin: 0 0 6px;
+        letter-spacing: -0.3px;
+      }
+      header p {
+        font-size: 13px;
+        color: #888;
+        margin: 0;
+        line-height: 1.5;
+      }
+      header code {
+        background: rgba(255,255,255,0.08);
+        padding: 1px 5px;
+        border-radius: 3px;
+        font-size: 12px;
+      }
+      #caSection {
+        font-size: 13px;
+        color: #888;
+        margin: 4px 0;
+      }
+      a { color: #64b5f6; text-decoration: none; }
+      a:hover { text-decoration: underline; }
+
+      .controls {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        padding: 12px 0;
+      }
+      .controls button {
+        padding: 8px 18px;
+        font-size: 13px;
+        font-weight: 500;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: background 0.15s, opacity 0.15s;
+      }
+      .controls button:disabled {
+        opacity: 0.35;
+        cursor: not-allowed;
+      }
+      #startButton {
+        background: #2979ff;
+        color: #fff;
+      }
+      #startButton:hover:not(:disabled) { background: #448aff; }
+      #stopButton {
+        background: #c62828;
+        color: #fff;
+      }
+      #stopButton:hover:not(:disabled) { background: #e53935; }
+      #enterVrButton {
+        background: #6a1b9a;
+        color: #fff;
+      }
+      #enterVrButton:hover:not(:disabled) { background: #8e24aa; }
+
       .preview {
         display: flex;
-        gap: 12px;
+        gap: 8px;
         justify-content: center;
         flex-wrap: wrap;
         width: 100%;
+        padding: 0 8px;
       }
       .preview video {
-        max-width: 42vw;
+        max-width: 48vw;
         min-width: 280px;
         background: #000;
+        border-radius: 8px;
       }
-      .controls {
-        display: flex;
-        gap: 12px;
-        align-items: center;
-      }
-      button {
-        padding: 10px 16px;
-        background: #1e88e5;
-        border: none;
-        color: #fff;
-        border-radius: 4px;
-        cursor: pointer;
-      }
-      button:disabled {
-        background: #555;
-        cursor: not-allowed;
-      }
-      a {
-        color: #90caf9;
-      }
-      pre {
+
+      #status {
+        font-size: 12px;
+        color: #666;
         max-width: 90vw;
         white-space: pre-wrap;
+        margin: 8px 0;
+        min-height: 1.4em;
       }
+
+      canvas#xrCanvas { display: none; }
+
+      /* ── HUD overlay ── */
+      #hud {
+        position: fixed;
+        z-index: 9999;
+        pointer-events: auto;
+        user-select: text;
+        -webkit-user-select: text;
+        top: 12px;
+        left: 12px;
+        font-family: ui-monospace, "SF Mono", "Cascadia Code", "Fira Code", Menlo, Consolas, monospace;
+        font-size: 13px;
+        line-height: 1.45;
+        color: #ddd;
+        max-width: 520px;
+      }
+      #hud.pos-tr { top: 12px; right: 12px; left: auto; }
+      #hud.pos-bl { bottom: 12px; left: 12px; top: auto; }
+      #hud.pos-br { bottom: 12px; right: 12px; top: auto; left: auto; }
+
+      .hud-panel {
+        background: rgba(0, 0, 0, 0.72);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+        padding: 10px 14px;
+        margin-bottom: 6px;
+      }
+
+      #hudControls {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      #hudControls label {
+        display: inline-flex;
+        gap: 5px;
+        align-items: center;
+        font-size: 11px;
+        color: #999;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      #hudControls select,
+      #hudControls input {
+        font-family: inherit;
+        font-size: 12px;
+        padding: 3px 6px;
+        border-radius: 5px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(255, 255, 255, 0.06);
+        color: #ccc;
+        outline: none;
+      }
+      #hudControls select:focus,
+      #hudControls input:focus {
+        border-color: rgba(255, 255, 255, 0.25);
+      }
+      .hud-btn {
+        font-family: inherit;
+        font-size: 11px;
+        padding: 3px 10px;
+        border-radius: 5px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(255, 255, 255, 0.06);
+        color: #aaa;
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+      .hud-btn:hover { background: rgba(255, 255, 255, 0.12); color: #ddd; }
+
+      /* Stats grid */
+      #statsPanel {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 2px 10px;
+        align-items: baseline;
+      }
+      .stat-label {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.6px;
+        color: #666;
+        white-space: nowrap;
+        padding: 2px 0;
+      }
+      .stat-value {
+        font-size: 13px;
+        padding: 2px 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .stat-value .eye {
+        display: inline-block;
+        min-width: 14px;
+        font-size: 10px;
+        font-weight: 600;
+        color: #555;
+        margin-right: 2px;
+      }
+      .stat-value .sep {
+        color: #333;
+        margin: 0 6px;
+      }
+      /* Health colors */
+      .h-green { color: #66bb6a; }
+      .h-yellow { color: #ffa726; }
+      .h-red { color: #ef5350; }
+      .h-dim { color: #555; }
     </style>
   </head>
   <body>
     <header>
-      <h1>rpi-vr-camera WebRTC Preview</h1>
+      <h1>VR Camera Preview</h1>
       <p>
-        This page negotiates a WebRTC connection with the Raspberry Pi and
-        displays the side-by-side stereo feed. For Oculus Quest, open this page
-        via <code>https://&lt;pi-ip&gt;:8443</code>. Install the provided CA
-        certificate first so the headset trusts the stream.
+        WebRTC stereo stream from Raspberry Pi.
+        On Quest, open <code>https://&lt;pi-ip&gt;:8443</code> after installing the CA cert.
       </p>
     </header>
     <p id="caSection" style="display:none;">
       <a id="caLink" href="/ca.crt" download>Download CA certificate</a>
-      (import under <strong>Settings → Security → Install certificates</strong>)
     </p>
     <div class="controls">
       <button id="startButton">Start Stream</button>
@@ -81,30 +242,51 @@
       <video id="leftVideo" playsinline autoplay muted></video>
       <video id="rightVideo" playsinline autoplay muted style="display:none;"></video>
     </div>
-    <canvas id="xrCanvas" style="display:none"></canvas>
-    <div id="stats">
-      <span id="fpsLabel"></span>
+    <canvas id="xrCanvas"></canvas>
+    <div id="status"></div>
+
+    <div id="hud" class="pos-tl">
+      <div class="hud-panel" id="hudControls">
+        <label>
+          Pos
+          <select id="hudPosition">
+            <option value="pos-tl">TL</option>
+            <option value="pos-tr">TR</option>
+            <option value="pos-bl">BL</option>
+            <option value="pos-br">BR</option>
+          </select>
+        </label>
+        <label title="Jitter buffer target in ms. Lower = less latency, more risk of stutter.">
+          JB
+          <input id="jbTargetMs" type="number" min="0" step="5" value="10" style="width:52px" />
+          <span style="color:#666">ms</span>
+        </label>
+        <button class="hud-btn" id="copyHudButton" type="button">Copy</button>
+      </div>
+      <div class="hud-panel" id="statsPanel">
+        <!-- Populated by JS -->
+      </div>
     </div>
-    <pre id="status"></pre>
 
     <script>
-      const startButton = document.getElementById("startButton");
-      const stopButton = document.getElementById("stopButton");
-      const enterVrButton = document.getElementById("enterVrButton");
-      const leftVideo = document.getElementById("leftVideo");
-      const rightVideo = document.getElementById("rightVideo");
-      const statusEl = document.getElementById("status");
-      const fpsLabel = document.getElementById("fpsLabel");
-      const xrCanvas = document.getElementById("xrCanvas");
-      const caSection = document.getElementById("caSection");
+      const $ = (id) => document.getElementById(id);
+      const startButton = $("startButton");
+      const stopButton = $("stopButton");
+      const enterVrButton = $("enterVrButton");
+      const leftVideo = $("leftVideo");
+      const rightVideo = $("rightVideo");
+      const statusEl = $("status");
+      const statsPanel = $("statsPanel");
+      const hudEl = $("hud");
+      const hudPosition = $("hudPosition");
+      const jbTargetMsEl = $("jbTargetMs");
+      const copyHudButton = $("copyHudButton");
+      const xrCanvas = $("xrCanvas");
+      const caSection = $("caSection");
 
       if (caSection) {
         fetch("/ca.crt", { method: "HEAD" })
-          .then((resp) => {
-            if (resp.ok) {
-              caSection.style.display = "block";
-            }
-          })
+          .then((r) => { if (r.ok) caSection.style.display = "block"; })
           .catch(() => {});
       }
 
@@ -124,82 +306,349 @@
       let uniformTexture = null;
       let leftStream = null;
       let rightStream = null;
+      let latencyDc = null;
 
-      function log(message) {
-        statusEl.textContent = message;
+      const receiverTuning = {
+        jitterBufferTargetS: 0.01,
+        playoutDelayHintS: 0.0,
+      };
+
+      /* ── Helpers ── */
+
+      function hc(value, greenRange, yellowRange) {
+        // Returns health CSS class
+        if (value >= greenRange[0] && value <= greenRange[1]) return "h-green";
+        if (value >= yellowRange[0] && value <= yellowRange[1]) return "h-yellow";
+        return "h-red";
       }
 
-      let frameCounter = 0;
-      let lastFpsUpdate = performance.now();
-      function monitorFps() {
-        frameCounter += 1;
-        const now = performance.now();
-        if (now - lastFpsUpdate >= 1000) {
-          const fps = (frameCounter * 1000) / (now - lastFpsUpdate);
-          fpsLabel.textContent = `Approx FPS: ${fps.toFixed(1)}`;
-          frameCounter = 0;
-          lastFpsUpdate = now;
-        }
-      requestAnimationFrame(monitorFps);
-    }
-    requestAnimationFrame(monitorFps);
-
-    let statsTimer = null;
-
-    function monitorConnection(connection) {
-      if (statsTimer) {
-        clearInterval(statsTimer);
+      function eyeLabel(mid, index) {
+        // Map mid to L/R eye label
+        if (mid === "0" || index === 0) return "L";
+        if (mid === "1" || index === 1) return "R";
+        return mid;
       }
-      statsTimer = setInterval(async () => {
-        if (!connection) {
-          return;
-        }
-        try {
-          const stats = await connection.getStats();
-          let videoStats = [];
-          stats.forEach((report) => {
-            if (report.type === "inbound-rtp" && report.kind === "video") {
-              videoStats.push(
-                `mid=${report.mid || "?"} frames=${report.framesDecoded || 0} bytes=${report.bytesReceived || 0}`
-              );
+
+      function statRow(label, html) {
+        return `<div class="stat-label">${label}</div><div class="stat-value">${html}</div>`;
+      }
+
+      function hudText() {
+        return statsPanel?.textContent?.replace(/\s+/g, " ").trim() || "";
+      }
+
+      if (hudPosition && hudEl) {
+        hudPosition.addEventListener("change", () => {
+          hudEl.classList.remove("pos-tl", "pos-tr", "pos-bl", "pos-br");
+          hudEl.classList.add(hudPosition.value);
+        });
+      }
+
+      function parseJbTargetMs() {
+        const v = jbTargetMsEl ? Number(jbTargetMsEl.value) : 10;
+        if (!Number.isFinite(v) || v < 0) return 10;
+        return v;
+      }
+
+      function applyReceiverTuning() {
+        if (!pc) return;
+        receiverTuning.jitterBufferTargetS = parseJbTargetMs() / 1000;
+        pc.getReceivers().forEach((r) => {
+          try { if (typeof r.playoutDelayHint === "number") r.playoutDelayHint = receiverTuning.playoutDelayHintS; } catch {}
+          try { if (typeof r.jitterBufferTarget === "number") r.jitterBufferTarget = receiverTuning.jitterBufferTargetS; } catch {}
+        });
+      }
+
+      if (jbTargetMsEl) jbTargetMsEl.addEventListener("change", () => applyReceiverTuning());
+
+      if (copyHudButton) {
+        copyHudButton.addEventListener("click", async () => {
+          const text = hudText();
+          try { await navigator.clipboard.writeText(text); } catch { window.prompt("Copy HUD text:", text); }
+        });
+      }
+
+      function log(message) { statusEl.textContent = message; }
+
+      /* ── Latency / datachannel state ── */
+
+      const latencyState = {
+        supported: false,
+        ewmaRttMs: null,
+        seq: 0,
+        pending: new Map(),
+        timer: null,
+      };
+
+      const serverStats = { byMid: {}, prevByMid: {} };
+
+      /* ── Stats monitor ── */
+
+      let statsTimer = null;
+      function monitorConnection(connection) {
+        if (statsTimer) clearInterval(statsTimer);
+
+        statsTimer = setInterval(async () => {
+          if (!connection) return;
+          try {
+            const stats = await connection.getStats();
+            const now = performance.now();
+            if (!monitorConnection._prev) {
+              monitorConnection._prev = { t: now, framesByMid: {}, inboundByMid: {}, bytesByMid: {}, droppedByMid: {} };
             }
-          });
-          if (videoStats.length) {
-            log(`Video stats: ${videoStats.join(" | ")}`);
-          }
-        } catch (err) {
-          console.warn("getStats failed", err);
-        }
-      }, 1000);
-    }
+            const prev = monitorConnection._prev;
+            const elapsed = (now - prev.t) / 1000;
 
-    async function stopStream(message) {
-      stopButton.disabled = true;
-      startButton.disabled = false;
-      enterVrButton.disabled = true;
+            const framesByMid = {};
+            const inboundByMid = {};
+            const bytesByMid = {};
+            const droppedByMid = {};
+            let iceRttMs = null;
+            let availBwMbps = null;
+
+            stats.forEach((report) => {
+              if (report.type === "inbound-rtp" && report.kind === "video") {
+                const mid = report.mid || "?";
+                framesByMid[mid] = report.framesDecoded || 0;
+                inboundByMid[mid] = report;
+                if (typeof report.bytesReceived === "number") bytesByMid[mid] = report.bytesReceived;
+                if (typeof report.framesDropped === "number") droppedByMid[mid] = report.framesDropped;
+              }
+              if (report.type === "candidate-pair" && report.state === "succeeded" && report.nominated) {
+                if (typeof report.currentRoundTripTime === "number") iceRttMs = report.currentRoundTripTime * 1000;
+                if (typeof report.availableIncomingBitrate === "number") availBwMbps = report.availableIncomingBitrate / 1_000_000;
+              }
+            });
+
+            const mids = Object.keys(framesByMid).sort();
+            if (!mids.length) return;
+
+            let html = "";
+
+            // ── Bitrate row ── (adaptive thresholds based on peak observed)
+            const brParts = [];
+            const brValues = [];
+            mids.forEach((mid) => {
+              if (bytesByMid[mid] != null && prev.bytesByMid[mid] != null && elapsed > 0) {
+                brValues.push(((bytesByMid[mid] - prev.bytesByMid[mid]) * 8) / elapsed / 1_000_000);
+              }
+            });
+            // Track peak bitrate to set adaptive thresholds
+            if (!monitorConnection._peakBr) monitorConnection._peakBr = 5;
+            const curPeak = Math.max(...brValues, 0);
+            monitorConnection._peakBr = monitorConnection._peakBr * 0.95 + curPeak * 0.05;
+            const peakBr = Math.max(monitorConnection._peakBr, 2);
+            // Green = within 20% of peak, yellow = within 50%, red = below
+            const brGreen = [peakBr * 0.8, peakBr * 1.5];
+            const brYellow = [peakBr * 0.5, peakBr * 0.8];
+            mids.forEach((mid, i) => {
+              if (bytesByMid[mid] != null && prev.bytesByMid[mid] != null && elapsed > 0) {
+                const mbps = ((bytesByMid[mid] - prev.bytesByMid[mid]) * 8) / elapsed / 1_000_000;
+                const cls = hc(mbps, brGreen, brYellow);
+                brParts.push(`<span class="eye">${eyeLabel(mid, i)}</span><span class="${cls}">${mbps.toFixed(1)}</span>`);
+              }
+            });
+            if (brParts.length) {
+              let brHtml = brParts.join(`<span class="sep">/</span>`);
+              brHtml += " Mbps";
+              if (availBwMbps != null) brHtml += `  <span class="h-dim">bw ${availBwMbps.toFixed(0)}</span>`;
+              html += statRow("Bitrate", brHtml);
+            }
+
+            // ── FPS row ── (auto-detect target from observed average)
+            const fpsParts = [];
+            const fpsValues = [];
+            mids.forEach((mid) => {
+              const framesNow = framesByMid[mid] || 0;
+              const framesPrev = prev.framesByMid[mid] || 0;
+              if (elapsed > 0) fpsValues.push((framesNow - framesPrev) / elapsed);
+            });
+            const fpsTarget = fpsValues.length ? Math.round(Math.max(...fpsValues) / 5) * 5 || 30 : 30;
+            mids.forEach((mid, i) => {
+              const framesNow = framesByMid[mid] || 0;
+              const framesPrev = prev.framesByMid[mid] || 0;
+              const fps = elapsed > 0 ? (framesNow - framesPrev) / elapsed : 0;
+              const cls = hc(Math.abs(fps - fpsTarget), [0, fpsTarget * 0.05], [0, fpsTarget * 0.15]);
+              fpsParts.push(`<span class="eye">${eyeLabel(mid, i)}</span><span class="${cls}">${fps.toFixed(1)}</span>`);
+            });
+            if (fpsParts.length) {
+              html += statRow("FPS", fpsParts.join(`<span class="sep">/</span>`) + ` <span class="h-dim">/ ${fpsTarget}</span>`);
+            }
+
+            // ── Resolution row ──
+            const resParts = [];
+            mids.forEach((mid, i) => {
+              const cur = inboundByMid[mid];
+              if (cur?.frameWidth && cur?.frameHeight) {
+                resParts.push(`<span class="eye">${eyeLabel(mid, i)}</span>${cur.frameWidth}x${cur.frameHeight}`);
+              }
+            });
+            if (resParts.length) {
+              html += statRow("Res", resParts.join(`<span class="sep">/</span>`));
+            }
+
+            // ── Latency row ── (RTT + per-eye JB and decode)
+            const latParts = [];
+            const rtt = latencyState.ewmaRttMs != null ? latencyState.ewmaRttMs : iceRttMs;
+            if (rtt != null) {
+              const src = latencyState.ewmaRttMs != null ? "dc" : "ice";
+              const cls = hc(rtt, [0, 10], [10, 30]);
+              latParts.push(`<span class="h-dim">rtt</span> <span class="${cls}">${rtt.toFixed(0)}ms</span> <span class="h-dim">${src}</span>`);
+            }
+            // Per-eye JB
+            const jbVals = [];
+            mids.forEach((mid, i) => {
+              const cur = inboundByMid[mid];
+              const prevIn = prev.inboundByMid[mid];
+              if (!cur || !prevIn || elapsed <= 0) return;
+              if (typeof cur.jitterBufferDelay === "number" && typeof cur.jitterBufferEmittedCount === "number" &&
+                  typeof prevIn.jitterBufferDelay === "number" && typeof prevIn.jitterBufferEmittedCount === "number") {
+                const dD = cur.jitterBufferDelay - prevIn.jitterBufferDelay;
+                const dC = cur.jitterBufferEmittedCount - prevIn.jitterBufferEmittedCount;
+                if (dC > 0 && dD >= 0) jbVals.push({ eye: eyeLabel(mid, i), ms: (dD / dC) * 1000 });
+              }
+            });
+            if (jbVals.length) {
+              const jbHtml = jbVals.map(v => {
+                const cls = hc(v.ms, [0, 20], [20, 60]);
+                return `<span class="eye">${v.eye}</span><span class="${cls}">${v.ms.toFixed(0)}ms</span>`;
+              }).join(`<span class="sep">/</span>`);
+              latParts.push(`<span class="h-dim">jb</span> ${jbHtml}`);
+            }
+            // Per-eye decode (averaged)
+            const decVals = [];
+            mids.forEach((mid, i) => {
+              const cur = inboundByMid[mid];
+              const prevIn = prev.inboundByMid[mid];
+              if (!cur || !prevIn || elapsed <= 0) return;
+              if (typeof cur.totalDecodeTime === "number" && typeof prevIn.totalDecodeTime === "number" &&
+                  typeof cur.framesDecoded === "number" && typeof prevIn.framesDecoded === "number") {
+                const dDec = cur.totalDecodeTime - prevIn.totalDecodeTime;
+                const dF = cur.framesDecoded - prevIn.framesDecoded;
+                if (dF > 0 && dDec >= 0) decVals.push((dDec / dF) * 1000);
+              }
+            });
+            if (decVals.length) {
+              const avgDec = decVals.reduce((a, b) => a + b, 0) / decVals.length;
+              latParts.push(`<span class="h-dim">dec</span> ${avgDec.toFixed(1)}ms`);
+            }
+            if (latParts.length) {
+              html += statRow("Latency", latParts.join(`<span class="sep">&middot;</span>`));
+            }
+
+            // ── Network row ── (aggregate jitter + per-eye loss)
+            const jitVals = [];
+            const lossVals = [];
+            let totalNack = 0;
+            let totalPli = 0;
+            mids.forEach((mid, i) => {
+              const cur = inboundByMid[mid];
+              const prevIn = prev.inboundByMid[mid];
+              if (!cur || !prevIn || elapsed <= 0) return;
+
+              if (typeof cur.jitter === "number") jitVals.push(cur.jitter * 1000);
+
+              if (typeof cur.packetsLost === "number" && typeof prevIn.packetsLost === "number" &&
+                  typeof cur.packetsReceived === "number" && typeof prevIn.packetsReceived === "number") {
+                const dL = Math.max(0, cur.packetsLost - prevIn.packetsLost);
+                const dR = Math.max(0, cur.packetsReceived - prevIn.packetsReceived);
+                if ((dL + dR) > 0) {
+                  lossVals.push({ eye: eyeLabel(mid, i), pct: (dL / (dL + dR)) * 100 });
+                } else {
+                  lossVals.push({ eye: eyeLabel(mid, i), pct: 0 });
+                }
+              }
+              if (typeof cur.nackCount === "number" && typeof prevIn.nackCount === "number") totalNack += Math.max(0, cur.nackCount - prevIn.nackCount);
+              if (typeof cur.pliCount === "number" && typeof prevIn.pliCount === "number") totalPli += Math.max(0, cur.pliCount - prevIn.pliCount);
+            });
+            const netParts = [];
+            if (jitVals.length) {
+              const maxJit = Math.max(...jitVals);
+              netParts.push(`<span class="h-dim">jit</span> ${maxJit.toFixed(0)}ms`);
+            }
+            if (lossVals.length) {
+              const maxLoss = Math.max(...lossVals.map(v => v.pct));
+              const cls = hc(maxLoss, [0, 0.1], [0.1, 1]);
+              netParts.push(`<span class="${cls}">loss ${maxLoss.toFixed(2)}%</span>`);
+            }
+            if (totalNack > 0) netParts.push(`<span class="h-dim">nack</span> ${(totalNack / elapsed).toFixed(1)}/s`);
+            if (totalPli > 0) netParts.push(`<span class="h-dim">pli</span> ${(totalPli / elapsed).toFixed(1)}/s`);
+            if (netParts.length) {
+              html += statRow("Network", netParts.join(`<span class="sep">&middot;</span>`));
+            }
+
+            // ── Frame drops row (client-side) ──
+            const dropParts = [];
+            mids.forEach((mid, i) => {
+              if (droppedByMid[mid] != null && prev.droppedByMid[mid] != null) {
+                const d = droppedByMid[mid] - prev.droppedByMid[mid];
+                if (d > 0) {
+                  const cls = hc(d, [0, 0], [1, 3]);
+                  dropParts.push(`<span class="eye">${eyeLabel(mid, i)}</span><span class="${cls}">${d}</span>`);
+                }
+              }
+            });
+            if (dropParts.length) {
+              html += statRow("Drops", dropParts.join(`<span class="sep">/</span>`));
+            }
+
+            // ── Server stats row ──
+            const srvParts = [];
+            for (const mid of mids) {
+              const ss = serverStats.byMid[mid];
+              const ps = serverStats.prevByMid[mid];
+              if (!ss) continue;
+              const parts = [];
+              if (ps && ss.t && ps.t) {
+                const dt = (ss.t - ps.t) / 1000;
+                if (dt > 0) {
+                  const dB = (ss.bytesSent || 0) - (ps.bytesSent || 0);
+                  const mbps = (dB * 8) / dt / 1_000_000;
+                  if (mbps > 0) parts.push(`${mbps.toFixed(1)}Mbps`);
+                  const dF = (ss.framesSent || 0) - (ps.framesSent || 0);
+                  if (dF > 0) parts.push(`${(dF / dt).toFixed(0)}fps`);
+                }
+              }
+              if (typeof ss.keyFramesSent === "number") parts.push(`kf=${ss.keyFramesSent}`);
+              if (typeof ss.droppedFrames === "number" && ss.droppedFrames > 0) {
+                const cls = hc(ss.droppedFrames, [0, 0], [1, 3]);
+                parts.push(`<span class="${cls}">drop=${ss.droppedFrames}</span>`);
+              }
+              if (parts.length) srvParts.push(`<span class="eye">${eyeLabel(mid, mids.indexOf(mid))}</span>${parts.join(" ")}`);
+            }
+            if (srvParts.length) {
+              html += statRow("Server", srvParts.join(`<span class="sep">/</span>`));
+            }
+
+            statsPanel.innerHTML = html || statRow("", '<span class="h-dim">waiting for data...</span>');
+            monitorConnection._prev = { t: now, framesByMid, inboundByMid, bytesByMid, droppedByMid };
+          } catch (err) {
+            console.warn("getStats failed", err);
+          }
+        }, 250);
+      }
+
+      /* ── Stream lifecycle ── */
+
+      async function stopStream(message) {
+        stopButton.disabled = true;
+        startButton.disabled = false;
+        enterVrButton.disabled = true;
 
         if (xrSession) {
-          try {
-            await xrSession.end();
-          } catch (err) {
-            console.warn("XR end error", err);
-          }
+          try { await xrSession.end(); } catch (err) { console.warn("XR end error", err); }
           xrSession = null;
           xrRefSpace = null;
         }
 
         if (pc) {
-          pc.getSenders().forEach((sender) => sender.track && sender.track.stop());
+          pc.getSenders().forEach((s) => s.track && s.track.stop());
           await pc.close();
           pc = null;
         }
 
-        if (leftStream) {
-          leftStream.getTracks().forEach((track) => track.stop());
-        }
-        if (rightStream) {
-          rightStream.getTracks().forEach((track) => track.stop());
-        }
+        if (leftStream) leftStream.getTracks().forEach((t) => t.stop());
+        if (rightStream) rightStream.getTracks().forEach((t) => t.stop());
         leftStream = null;
         rightStream = null;
 
@@ -212,7 +661,7 @@
       async function startStream() {
         startButton.disabled = true;
         stopButton.disabled = false;
-        log("Starting WebRTC negotiation…");
+        log("Connecting...");
 
         leftStream = null;
         rightStream = null;
@@ -224,57 +673,80 @@
           iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }],
         });
 
-        pc.addEventListener("track", (event) => {
-          console.log("track event", event.track.kind, event.track.id, event.streams);
-          if (event.track.kind !== "video") {
-            return;
+        // DataChannel for RTT pings + server stats
+        latencyDc = pc.createDataChannel("latency");
+        latencyState.supported = true;
+        latencyDc.addEventListener("open", () => {
+          if (latencyState.timer) clearInterval(latencyState.timer);
+          latencyState.timer = setInterval(() => {
+            if (!latencyDc || latencyDc.readyState !== "open") return;
+            const seq = latencyState.seq++;
+            const t = performance.now();
+            latencyState.pending.set(seq, t);
+            latencyDc.send(JSON.stringify({ type: "ping", seq, t }));
+          }, 500);
+        });
+        latencyDc.addEventListener("message", (event) => {
+          if (typeof event.data !== "string") return;
+          let msg;
+          try { msg = JSON.parse(event.data); } catch { return; }
+
+          if (msg && msg.type === "pong" && typeof msg.seq === "number") {
+            const sentT = latencyState.pending.get(msg.seq);
+            latencyState.pending.delete(msg.seq);
+            if (typeof sentT === "number") {
+              const rtt = performance.now() - sentT;
+              latencyState.ewmaRttMs = latencyState.ewmaRttMs == null ? rtt : latencyState.ewmaRttMs * 0.8 + rtt * 0.2;
+            }
           }
+          if (msg && msg.type === "server_stats" && msg.mid != null) {
+            serverStats.prevByMid[msg.mid] = serverStats.byMid[msg.mid] || null;
+            serverStats.byMid[msg.mid] = { ...msg, t: performance.now() };
+          }
+        });
+        latencyDc.addEventListener("close", () => {
+          latencyState.supported = false;
+          latencyState.pending.clear();
+          latencyState.ewmaRttMs = null;
+          if (latencyState.timer) { clearInterval(latencyState.timer); latencyState.timer = null; }
+        });
+
+        pc.addEventListener("track", (event) => {
+          if (event.track.kind !== "video") return;
+
+          try { if (event.receiver && typeof event.receiver.playoutDelayHint === "number") event.receiver.playoutDelayHint = receiverTuning.playoutDelayHintS; } catch {}
+          try { if (event.receiver && typeof event.receiver.jitterBufferTarget === "number") event.receiver.jitterBufferTarget = parseJbTargetMs() / 1000; } catch {}
+
           const stream = event.streams[0] || new MediaStream([event.track]);
           if (!leftStream) {
             leftStream = stream;
             leftVideo.srcObject = leftStream;
-            leftVideo.play().catch((err) => console.warn("left play() failed", err));
-            log(`Left track ${event.track.id} attached.`);
+            leftVideo.play().catch((e) => console.warn("left play() failed", e));
+            log("Left eye connected.");
           } else if (!rightStream) {
             rightStream = stream;
             rightVideo.srcObject = rightStream;
             rightVideo.style.display = "block";
-            rightVideo.play().catch((err) => console.warn("right play() failed", err));
-            log(`Right track ${event.track.id} attached.`);
+            rightVideo.play().catch((e) => console.warn("right play() failed", e));
+            log("Both eyes connected.");
           } else {
-            rightStream.getTracks().forEach((track) => track.stop());
+            rightStream.getTracks().forEach((t) => t.stop());
             rightStream = stream;
             rightVideo.srcObject = rightStream;
             rightVideo.style.display = "block";
-            rightVideo.play().catch((err) => console.warn("right play() failed", err));
-            log(`Replaced extra track with ${event.track.id}.`);
+            rightVideo.play().catch((e) => console.warn("right play() failed", e));
           }
 
-          event.track.addEventListener("unmute", () => {
-            console.log("track unmute", event.track.id);
-          });
-          event.track.addEventListener("mute", () => {
-            console.log("track mute", event.track.id);
-          });
           event.track.addEventListener("ended", () => {
-            console.log("track ended", event.track.id);
-            if (leftStream && leftStream.getTracks().includes(event.track)) {
-              leftStream = null;
-              leftVideo.srcObject = null;
-            }
-            if (rightStream && rightStream.getTracks().includes(event.track)) {
-              rightStream = null;
-              rightVideo.srcObject = null;
-              rightVideo.style.display = "none";
-            }
+            if (leftStream && leftStream.getTracks().includes(event.track)) { leftStream = null; leftVideo.srcObject = null; }
+            if (rightStream && rightStream.getTracks().includes(event.track)) { rightStream = null; rightVideo.srcObject = null; rightVideo.style.display = "none"; }
           });
         });
 
         pc.addEventListener("connectionstatechange", () => {
-          log(`Peer connection state: ${pc.connectionState}`);
-          if (pc.connectionState === "failed" || pc.connectionState === "closed") {
-            stopStream(`Connection ${pc.connectionState}`);
-          }
+          if (pc.connectionState === "connected") log("Connected.");
+          else if (pc.connectionState === "failed" || pc.connectionState === "closed") stopStream(`Connection ${pc.connectionState}.`);
+          else log(`${pc.connectionState}...`);
         });
 
         pc.addTransceiver("video", { direction: "recvonly" });
@@ -285,10 +757,6 @@
         await pc.setLocalDescription(offer);
         monitorConnection(pc);
 
-        const fail = async (message) => {
-          await stopStream(message);
-        };
-
         let response;
         try {
           response = await fetch("/offer", {
@@ -297,237 +765,130 @@
             body: JSON.stringify(pc.localDescription),
           });
         } catch (err) {
-          await fail(`Offer network error: ${err}`);
+          await stopStream(`Network error: ${err}`);
           return;
         }
 
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) {
-          const message = payload.error || response.statusText;
-          await fail(`Offer failed: ${message}`);
+          await stopStream(`Offer failed: ${payload.error || response.statusText}`);
           return;
         }
 
         await pc.setRemoteDescription(payload);
-        log("WebRTC connection established.");
-        if (hasWebXR) {
-          enterVrButton.disabled = false;
-        }
+        applyReceiverTuning();
+        if (hasWebXR) enterVrButton.disabled = false;
       }
 
+      /* ── WebXR ── */
+
       function ensureGl() {
-        if (gl) {
-          return gl;
-        }
+        if (gl) return gl;
+        const attrs = { xrCompatible: true, alpha: false };
+        gl = xrCanvas.getContext("webgl2", attrs) || xrCanvas.getContext("webgl", attrs);
+        if (!gl) { log("WebGL not available."); return null; }
 
-        const contextAttributes = { xrCompatible: true, alpha: false };
-        gl =
-          xrCanvas.getContext("webgl2", contextAttributes) ||
-          xrCanvas.getContext("webgl", contextAttributes);
+        const vs = `attribute vec2 aPosition; attribute vec2 aTexCoord; varying vec2 vTexCoord;
+          void main() { gl_Position = vec4(aPosition, 0.0, 1.0); vTexCoord = aTexCoord; }`;
+        const fs = `precision mediump float; varying vec2 vTexCoord; uniform sampler2D uTexture;
+          void main() { gl_FragColor = texture2D(uTexture, vTexCoord); }`;
 
-        if (!gl) {
-          log("WebGL not available; cannot enter VR.");
-          return null;
-        }
-
-        const vertexSource = `
-          attribute vec2 aPosition;
-          attribute vec2 aTexCoord;
-          varying vec2 vTexCoord;
-          void main() {
-            gl_Position = vec4(aPosition, 0.0, 1.0);
-            vTexCoord = aTexCoord;
-          }
-        `;
-
-        const fragmentSource = `
-          precision mediump float;
-          varying vec2 vTexCoord;
-          uniform sampler2D uTexture;
-          void main() {
-            gl_FragColor = texture2D(uTexture, vTexCoord);
-          }
-        `;
-
-        const compileShader = (type, source) => {
-          const shader = gl.createShader(type);
-          gl.shaderSource(shader, source);
-          gl.compileShader(shader);
-          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-            const info = gl.getShaderInfoLog(shader);
-            gl.deleteShader(shader);
-            throw new Error(`Shader compile failed: ${info}`);
-          }
-          return shader;
+        const compile = (type, src) => {
+          const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+          if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { gl.deleteShader(s); return null; }
+          return s;
         };
-
-        const vertexShader = compileShader(gl.VERTEX_SHADER, vertexSource);
-        const fragmentShader = compileShader(gl.FRAGMENT_SHADER, fragmentSource);
-
+        const vShader = compile(gl.VERTEX_SHADER, vs);
+        const fShader = compile(gl.FRAGMENT_SHADER, fs);
         shaderProgram = gl.createProgram();
-        gl.attachShader(shaderProgram, vertexShader);
-        gl.attachShader(shaderProgram, fragmentShader);
-        gl.linkProgram(shaderProgram);
-        if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)) {
-          const info = gl.getProgramInfoLog(shaderProgram);
-          throw new Error(`Program link failed: ${info}`);
-        }
-        gl.deleteShader(vertexShader);
-        gl.deleteShader(fragmentShader);
-        gl.useProgram(shaderProgram);
+        gl.attachShader(shaderProgram, vShader); gl.attachShader(shaderProgram, fShader);
+        gl.linkProgram(shaderProgram); gl.useProgram(shaderProgram);
+        gl.deleteShader(vShader); gl.deleteShader(fShader);
 
-        positionBuffer = gl.createBuffer();
-        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-        gl.bufferData(
-          gl.ARRAY_BUFFER,
-          new Float32Array([
-            -1, -1,
-            1, -1,
-            -1, 1,
-            -1, 1,
-            1, -1,
-            1, 1,
-          ]),
-          gl.STATIC_DRAW
-        );
+        const quad = [-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1];
+        const uv = [0,0, 1,0, 0,1, 0,1, 1,0, 1,1];
+        positionBuffer = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(quad), gl.STATIC_DRAW);
         attribPosition = gl.getAttribLocation(shaderProgram, "aPosition");
-        gl.enableVertexAttribArray(attribPosition);
-        gl.vertexAttribPointer(attribPosition, 2, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(attribPosition); gl.vertexAttribPointer(attribPosition, 2, gl.FLOAT, false, 0, 0);
 
-        texcoordBuffer = gl.createBuffer();
-        gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
-        gl.bufferData(
-          gl.ARRAY_BUFFER,
-          new Float32Array([
-            0, 0,
-            1, 0,
-            0, 1,
-            0, 1,
-            1, 0,
-            1, 1,
-          ]),
-          gl.STATIC_DRAW
-        );
+        texcoordBuffer = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(uv), gl.STATIC_DRAW);
         attribTexCoord = gl.getAttribLocation(shaderProgram, "aTexCoord");
-        gl.enableVertexAttribArray(attribTexCoord);
-        gl.vertexAttribPointer(attribTexCoord, 2, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(attribTexCoord); gl.vertexAttribPointer(attribTexCoord, 2, gl.FLOAT, false, 0, 0);
 
         uniformTexture = gl.getUniformLocation(shaderProgram, "uTexture");
-        gl.uniform1i(uniformTexture, 0);
-        gl.activeTexture(gl.TEXTURE0);
+        gl.uniform1i(uniformTexture, 0); gl.activeTexture(gl.TEXTURE0);
 
-        const createTexture = () => {
-          const texture = gl.createTexture();
-          gl.bindTexture(gl.TEXTURE_2D, texture);
+        const mkTex = () => {
+          const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
           gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, 2, 2, 0, gl.RGB, gl.UNSIGNED_BYTE, null);
-          return texture;
+          return t;
         };
-
-        leftTexture = createTexture();
-        rightTexture = createTexture();
+        leftTexture = mkTex(); rightTexture = mkTex();
         gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-
-        gl.clearColor(0, 0, 0, 1);
-        gl.disable(gl.DEPTH_TEST);
-        gl.disable(gl.CULL_FACE);
-
+        gl.clearColor(0,0,0,1); gl.disable(gl.DEPTH_TEST); gl.disable(gl.CULL_FACE);
         return gl;
       }
 
       async function enterVR() {
-        if (!hasWebXR) {
-          log("WebXR not supported in this browser.");
-          return;
-        }
+        if (!hasWebXR) { log("WebXR not supported."); return; }
         const supported = await navigator.xr.isSessionSupported("immersive-vr").catch(() => false);
-        if (!supported) {
-          log("Immersive VR not available on this device.");
-          return;
-        }
-        const context = ensureGl();
-        if (!context) {
-          return;
-        }
-        if (xrSession) {
-          await xrSession.end();
-        }
+        if (!supported) { log("Immersive VR not available."); return; }
+        const ctx = ensureGl();
+        if (!ctx) return;
+        if (xrSession) await xrSession.end();
+
         const session = await navigator.xr.requestSession("immersive-vr", {
-          optionalFeatures: ["local-floor", "bounded-floor"],
+          optionalFeatures: ["local-floor", "bounded-floor", "dom-overlay"],
+          domOverlay: { root: hudEl },
         });
         xrSession = session;
-
-        if (context.makeXRCompatible) {
-          await context.makeXRCompatible();
-        }
-        const glLayer = new XRWebGLLayer(xrSession, context);
+        if (ctx.makeXRCompatible) await ctx.makeXRCompatible();
+        const glLayer = new XRWebGLLayer(xrSession, ctx);
         xrSession.updateRenderState({ baseLayer: glLayer });
         xrRefSpace = await xrSession.requestReferenceSpace("local");
-
-        xrSession.addEventListener("end", () => {
-          xrSession = null;
-          xrRefSpace = null;
-          log("VR session ended.");
-        });
-
+        xrSession.addEventListener("end", () => { xrSession = null; xrRefSpace = null; log("VR session ended."); });
         xrSession.requestAnimationFrame(onXRFrame);
-        log("Entered VR session.");
+        log("Entered VR.");
       }
 
       function onXRFrame(time, frame) {
-        if (!xrSession || !gl) {
-          return;
-        }
+        if (!xrSession || !gl) return;
         xrSession.requestAnimationFrame(onXRFrame);
         const pose = frame.getViewerPose(xrRefSpace);
-        if (!pose) {
-          return;
-        }
-
+        if (!pose) return;
         const layer = xrSession.renderState.baseLayer;
         gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
-
-        const updateTextureFromVideo = (texture, videoElement) => {
-          if (videoElement && videoElement.readyState >= videoElement.HAVE_CURRENT_DATA) {
-            gl.bindTexture(gl.TEXTURE_2D, texture);
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, videoElement);
+        const update = (tex, vid) => {
+          if (vid && vid.readyState >= vid.HAVE_CURRENT_DATA) {
+            gl.bindTexture(gl.TEXTURE_2D, tex);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, vid);
           }
         };
-
-        updateTextureFromVideo(leftTexture, leftVideo);
-        if (rightStream) {
-          updateTextureFromVideo(rightTexture, rightVideo);
-        }
-
-        gl.clear(gl.COLOR_BUFFER_BIT);
-        gl.useProgram(shaderProgram);
-
-        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-        gl.vertexAttribPointer(attribPosition, 2, gl.FLOAT, false, 0, 0);
-        gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
-        gl.vertexAttribPointer(attribTexCoord, 2, gl.FLOAT, false, 0, 0);
-
-        for (let i = 0; i < pose.views.length; i += 1) {
+        update(leftTexture, leftVideo);
+        if (rightStream) update(rightTexture, rightVideo);
+        gl.clear(gl.COLOR_BUFFER_BIT); gl.useProgram(shaderProgram);
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer); gl.vertexAttribPointer(attribPosition, 2, gl.FLOAT, false, 0, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer); gl.vertexAttribPointer(attribTexCoord, 2, gl.FLOAT, false, 0, 0);
+        for (let i = 0; i < pose.views.length; i++) {
           const view = pose.views[i];
-          const viewport = layer.getViewport(view);
-          gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+          const vp = layer.getViewport(view);
+          gl.viewport(vp.x, vp.y, vp.width, vp.height);
           const useRight = (view.eye && view.eye.toLowerCase() === "right") || i === 1;
-          const texture = useRight && rightStream ? rightTexture : leftTexture;
-          gl.bindTexture(gl.TEXTURE_2D, texture);
+          gl.bindTexture(gl.TEXTURE_2D, useRight && rightStream ? rightTexture : leftTexture);
           gl.drawArrays(gl.TRIANGLES, 0, 6);
         }
-
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       }
 
       startButton.addEventListener("click", startStream);
       stopButton.addEventListener("click", () => stopStream());
-      enterVrButton.addEventListener("click", () =>
-        enterVR().catch((err) => stopStream(`XR error: ${err}`))
-      );
+      enterVrButton.addEventListener("click", () => enterVR().catch((e) => stopStream(`XR error: ${e}`)));
     </script>
   </body>
 </html>
