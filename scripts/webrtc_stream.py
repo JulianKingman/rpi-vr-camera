@@ -6,16 +6,21 @@ from __future__ import annotations
 import argparse
 import asyncio
 import copy
+import grp
 import json
+import os
+import shutil
 import signal
+import socket
 import ssl
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 from threading import Lock
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import yaml
 from aiohttp import web
@@ -42,8 +47,398 @@ from aiortc.codecs import h264 as h264_codecs
 
 MICROSECOND_TIME_BASE = Fraction(1, 1_000_000)
 
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "camera_profiles.yaml"
-STATIC_DIR = Path(__file__).resolve().parent.parent / "web"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_PATH = REPO_ROOT / "config" / "camera_profiles.yaml"
+STATIC_DIR = REPO_ROOT / "web"
+CERT_DIR = REPO_ROOT / "certs"
+
+# Camera descriptions used in health-check diagnostics.
+CAMERA_LABELS = {
+    0: "Left, CSI port 0",
+    1: "Right, CSI port 1",
+}
+
+BOOT_CONFIG_PATHS = (
+    Path("/boot/firmware/config.txt"),
+    Path("/boot/config.txt"),
+)
+
+
+# ---------------------------------------------------------------------------
+# Pre-flight camera health checks
+# ---------------------------------------------------------------------------
+
+def _safe_char(char: str, fallback: str) -> str:
+    """Return char if stdout can encode it, otherwise fallback."""
+    try:
+        char.encode(sys.stdout.encoding or "utf-8")
+        return char
+    except (UnicodeEncodeError, LookupError):
+        return fallback
+
+_OK = _safe_char("\u2713", "[OK]")
+_FAIL = _safe_char("\u2717", "[FAIL]")
+_ARROW = _safe_char("\u2192", "->")
+_DASH = _safe_char("\u2014", "--")
+
+
+def _print_ok(msg: str) -> None:
+    print(f"  {_OK} {msg}", flush=True)
+
+
+def _print_fail(msg: str) -> None:
+    print(f"  {_FAIL} {msg}", flush=True)
+
+
+def _print_hint(msg: str) -> None:
+    print(f"    {_ARROW} {msg}", flush=True)
+
+
+def _check_libcamera_available() -> bool:
+    """Verify that libcamera can be reached (Python bindings + CLI tool)."""
+    ok = True
+
+    # Check Python bindings
+    try:
+        import libcamera  # noqa: F401
+    except ImportError:
+        _print_fail("libcamera Python bindings not found")
+        _print_hint("Install with: sudo apt install -y python3-libcamera")
+        ok = False
+
+    # Check CLI tool (rpicam-hello on newer Pi OS, libcamera-hello on older)
+    if shutil.which("rpicam-hello") is None and shutil.which("libcamera-hello") is None:
+        _print_fail("rpicam-hello / libcamera-hello CLI tool not found on PATH")
+        _print_hint("Install with: sudo apt install -y rpicam-apps (or libcamera-apps)")
+        ok = False
+
+    if ok:
+        _print_ok("libcamera is available")
+
+    return ok
+
+
+def _check_video_group() -> bool:
+    """Check that the current user belongs to the 'video' group."""
+    try:
+        video_gid = grp.getgrnam("video").gr_gid
+    except KeyError:
+        # No 'video' group on this system; skip the check.
+        return True
+
+    user_groups = os.getgroups()
+    if video_gid in user_groups:
+        _print_ok(f"User '{os.getenv('USER', 'unknown')}' is in the 'video' group")
+        return True
+
+    _print_fail(f"User '{os.getenv('USER', 'unknown')}' is NOT in the 'video' group")
+    _print_hint("Add yourself with: sudo usermod -aG video $USER  (then log out and back in)")
+    return False
+
+
+def _check_boot_config() -> bool:
+    """Look for a camera-related dtoverlay in the Raspberry Pi boot config."""
+    config_path: Optional[Path] = None
+    for candidate in BOOT_CONFIG_PATHS:
+        if candidate.exists():
+            config_path = candidate
+            break
+
+    if config_path is None:
+        # Not a Raspberry Pi or config is elsewhere; skip silently.
+        return True
+
+    try:
+        config_text = config_path.read_text()
+    except PermissionError:
+        _print_fail(f"Cannot read {config_path} (permission denied)")
+        _print_hint(f"Run: sudo chmod +r {config_path}")
+        return False
+
+    # Look for camera-related overlays (dtoverlay=imx..., dtoverlay=ov..., camera_auto_detect, etc.)
+    camera_indicators = [
+        "camera_auto_detect=1",
+        "dtoverlay=imx",
+        "dtoverlay=ov",
+        "start_x=1",
+    ]
+    found = False
+    for indicator in camera_indicators:
+        for line in config_text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if indicator in stripped:
+                found = True
+                break
+        if found:
+            break
+
+    if found:
+        _print_ok(f"Camera overlay/auto-detect enabled in {config_path}")
+    else:
+        _print_fail(f"No camera overlay found in {config_path}")
+        _print_hint(f"Ensure 'camera_auto_detect=1' or a camera dtoverlay is in {config_path}")
+        _print_hint("Edit with: sudo nano /boot/firmware/config.txt  (then reboot)")
+
+    return found
+
+
+def _check_camera_devices() -> Tuple[bool, List[dict]]:
+    """Use Picamera2.global_camera_info() to detect attached cameras."""
+    if not PICAMERA2_AVAILABLE or Picamera2 is None:
+        _print_fail("picamera2 is not installed")
+        _print_hint("Install with: sudo apt install -y python3-picamera2")
+        return False, []
+
+    try:
+        cam_info: List[dict] = Picamera2.global_camera_info()
+    except Exception as exc:
+        _print_fail(f"Picamera2 failed to enumerate cameras: {exc}")
+        _print_hint("Check that libcamera is working: rpicam-hello --list-cameras")
+        return False, []
+
+    if not cam_info:
+        _print_fail("No cameras detected by Picamera2")
+        _print_hint("Check ribbon cables and ensure camera overlays are enabled")
+        _print_hint("Run: rpicam-hello --list-cameras")
+        return False, []
+
+    return True, cam_info
+
+
+def _check_camera_not_busy(index: int) -> bool:
+    """Check if /dev/video* devices tied to a camera index might be held by another process.
+
+    Returns True always (warning only) since PipeWire/WirePlumber commonly hold
+    video devices open and picamera2 can usually still acquire the camera.
+    """
+    video_dev = Path(f"/dev/video{index}")
+    if not video_dev.exists() or shutil.which("lsof") is None:
+        return True
+
+    try:
+        result = subprocess.run(
+            ["lsof", "-w", str(video_dev)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # Extract process names holding the device
+            procs = set()
+            for line in result.stdout.strip().splitlines()[1:]:
+                parts = line.split()
+                if parts:
+                    procs.add(parts[0])
+            proc_list = ", ".join(sorted(procs))
+            # PipeWire/WirePlumber commonly hold devices open; warn but don't fail
+            print(f"  [WARN] /dev/video{index} is held by: {proc_list} (may be normal)", flush=True)
+    except Exception:
+        pass
+
+    return True
+
+
+def preflight_camera_check() -> bool:
+    """Run all pre-flight camera health checks.
+
+    Returns True if both cameras are ready. On failure, prints
+    human-readable diagnostics and returns False.
+    """
+    print("[PREFLIGHT] Checking camera hardware...", flush=True)
+    all_ok = True
+
+    # 1. libcamera availability
+    if not _check_libcamera_available():
+        all_ok = False
+
+    # 2. video group membership
+    if not _check_video_group():
+        all_ok = False
+
+    # 3. Boot config overlay
+    if not _check_boot_config():
+        all_ok = False
+
+    # 4. Enumerate cameras via Picamera2
+    cameras_found, cam_info = _check_camera_devices()
+    if not cameras_found:
+        all_ok = False
+
+    # 5. Verify we have at least 2 cameras (cam0 + cam1)
+    if cameras_found:
+        num_cameras = len(cam_info)
+        if num_cameras < 2:
+            all_ok = False
+            _print_fail(f"Only {num_cameras} camera(s) detected; this stereo setup requires 2")
+            for cam_idx in range(2):
+                if cam_idx >= num_cameras:
+                    label = CAMERA_LABELS.get(cam_idx, f"index {cam_idx}")
+                    _print_fail(f"Camera {cam_idx} ({label}) not detected")
+                    _print_hint("Check that the ribbon cable is fully seated")
+                    _print_hint("Verify /boot/firmware/config.txt has the camera overlay enabled")
+                    _print_hint(f"Run 'rpicam-hello --camera {cam_idx}' to test")
+        else:
+            for cam_idx in range(2):
+                info = cam_info[cam_idx]
+                model = info.get("Model", "unknown")
+                label = CAMERA_LABELS.get(cam_idx, f"index {cam_idx}")
+                _print_ok(f"Camera {cam_idx} ({label}) detected: {model}")
+
+    # 6. Check that cameras are not held by other processes
+    for cam_idx in range(2):
+        if not _check_camera_not_busy(cam_idx):
+            all_ok = False
+
+    if all_ok:
+        print("[PREFLIGHT] All camera checks passed.", flush=True)
+    else:
+        print("[PREFLIGHT] One or more camera checks failed. See messages above.", flush=True)
+
+    return all_ok
+
+
+# ---------------------------------------------------------------------------
+# Network / startup helpers
+# ---------------------------------------------------------------------------
+
+def _get_local_ips() -> List[str]:
+    """Return a list of non-loopback IPv4 addresses for this host."""
+    ips: List[str] = []
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            addr = info[4][0]
+            if not addr.startswith("127."):
+                ips.append(addr)
+    except Exception:  # noqa: BLE001
+        pass
+    # Fallback: connect to a public IP to discover the default route address
+    if not ips:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            addr = s.getsockname()[0]
+            s.close()
+            if not addr.startswith("127."):
+                ips.append(addr)
+        except Exception:  # noqa: BLE001
+            pass
+    return sorted(set(ips))
+
+
+def _get_hostname() -> str:
+    """Return the machine hostname (e.g. 'rpi-vr-camera')."""
+    return socket.gethostname()
+
+
+def _render_qr_ascii(url: str) -> str:
+    """Render a QR code as a compact ASCII block using the qrcode library.
+
+    Falls back to a simple text notice if the library is unavailable.
+    """
+    try:
+        import qrcode  # type: ignore[import-untyped]
+        qr = qrcode.QRCode(
+            version=None,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=1,
+            border=1,
+        )
+        qr.add_data(url)
+        qr.make(fit=True)
+        matrix = qr.get_matrix()
+        rows = len(matrix)
+        cols = len(matrix[0]) if rows else 0
+        lines: List[str] = []
+        BOTH_BLACK = _safe_char("\u2588", "#")
+        TOP_BLACK = _safe_char("\u2580", "^")
+        BOT_BLACK = _safe_char("\u2584", "v")
+        BOTH_WHITE = " "
+        for r in range(0, rows, 2):
+            line_chars: List[str] = []
+            for c in range(cols):
+                top = matrix[r][c]
+                bot = matrix[r + 1][c] if r + 1 < rows else False
+                if top and bot:
+                    line_chars.append(BOTH_BLACK)
+                elif top:
+                    line_chars.append(TOP_BLACK)
+                elif bot:
+                    line_chars.append(BOT_BLACK)
+                else:
+                    line_chars.append(BOTH_WHITE)
+            lines.append("  " + "".join(line_chars))
+        return "\n".join(lines)
+    except ImportError:
+        return "  (install 'qrcode' package for QR code display: pip install qrcode)"
+    except Exception:  # noqa: BLE001
+        return "  (QR code generation failed)"
+
+
+def print_camera_init(index: int, description: str, resolution: Tuple[int, int], framerate: float) -> None:
+    """Print a camera initialization confirmation line."""
+    w, h = resolution
+    fps = int(framerate) if framerate == int(framerate) else framerate
+    side = "Left" if description == "left" else "Right"
+    print(f"{_OK} Camera {index} ({side}) initialized {_DASH} {w}x{h} @ {fps}fps", flush=True)
+
+
+def print_tls_loaded(cert_path: Path, key_path: Path) -> None:
+    """Print TLS certificate confirmation."""
+    cert_dir = cert_path.parent
+    print(f"{_OK} TLS certificates loaded from {cert_dir}/", flush=True)
+
+
+def print_ready_banner(
+    host: str,
+    port: int,
+    scheme: str,
+    cert_dir: Optional[Path] = None,
+) -> None:
+    """Print the full ready banner with URLs, QR code, and status."""
+    ips = _get_local_ips()
+    hostname = _get_hostname()
+
+    urls: List[str] = []
+    for ip in ips:
+        urls.append(f"{scheme}://{ip}:{port}/")
+
+    mdns_url = f"{scheme}://{hostname}.local:{port}/"
+    primary_url = urls[0] if urls else mdns_url
+
+    separator = "=" * 58
+    print("", flush=True)
+    print(separator, flush=True)
+    print("  Ready for connections", flush=True)
+    print(separator, flush=True)
+    print("", flush=True)
+
+    if urls:
+        print("  Network URLs:", flush=True)
+        for url in urls:
+            print(f"    {url}", flush=True)
+    print("  mDNS URL:", flush=True)
+    print(f"    {mdns_url}", flush=True)
+
+    print("", flush=True)
+    print(f"  QR code ({primary_url}):", flush=True)
+    qr_output = _render_qr_ascii(primary_url)
+    print(qr_output, flush=True)
+
+    print("", flush=True)
+    print(separator, flush=True)
+    print("[INFO] Press Ctrl+C to stop the server.", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Settings classification
+# ---------------------------------------------------------------------------
+
+# Settings that can be applied at runtime without restarting cameras
+RUNTIME_SETTINGS = {"awb_mode", "colour_gains", "bitrate_mbps", "awb_enable"}
+# Settings that require a full server restart to take effect
+RESTART_SETTINGS = {"resolution", "rotation", "hflip", "vflip", "crop", "offset_x", "offset_y"}
 
 
 def load_profile(name: str, config_path: Path) -> dict:
@@ -372,6 +767,9 @@ class HardwareEncoderCamera:
             raise
         self._apply_runtime_controls(target_rate)
 
+        # Print camera initialization confirmation
+        print_camera_init(index, description, resolution, target_rate)
+
     def _apply_runtime_controls(self, target_rate: float) -> None:
         controls: Dict[str, object] = {}
         controls["FrameRate"] = target_rate
@@ -397,6 +795,52 @@ class HardwareEncoderCamera:
             self.camera.set_controls(controls)
         except Exception as exc:  # noqa: BLE001
             print(f"[WARN] Failed to apply controls for camera {self.index}: {exc}", file=sys.stderr)
+
+    def apply_runtime_settings(self, updates: dict) -> list[str]:
+        """Apply runtime-changeable settings. Returns list of changes applied."""
+        applied = []
+        cam_controls: Dict[str, object] = {}
+
+        if "awb_mode" in updates:
+            mode = resolve_awb_mode(updates["awb_mode"])
+            if mode is not None:
+                self.profile["awb_mode"] = updates["awb_mode"]
+                cam_controls["AwbMode"] = mode
+                applied.append(f"awb_mode={updates['awb_mode']}")
+
+        if "awb_enable" in updates:
+            val = bool(updates["awb_enable"])
+            self.profile["awb_enable"] = val
+            cam_controls["AwbEnable"] = val
+            applied.append(f"awb_enable={val}")
+
+        if "colour_gains" in updates:
+            gains = updates["colour_gains"]
+            if isinstance(gains, (list, tuple)) and len(gains) == 2:
+                self.profile["colour_gains"] = [float(gains[0]), float(gains[1])]
+                cam_controls["ColourGains"] = (float(gains[0]), float(gains[1]))
+                applied.append(f"colour_gains=[{gains[0]}, {gains[1]}]")
+
+        if "bitrate_mbps" in updates:
+            new_bitrate_mbps = float(updates["bitrate_mbps"])
+            new_bitrate_bps = int(new_bitrate_mbps * 1_000_000)
+            self.profile["bitrate_mbps"] = new_bitrate_mbps
+            self.bitrate_bps = new_bitrate_bps
+            h264_codecs.MAX_BITRATE = max(h264_codecs.MAX_BITRATE, new_bitrate_bps)
+            h264_codecs.DEFAULT_BITRATE = max(h264_codecs.DEFAULT_BITRATE, new_bitrate_bps)
+            try:
+                self.encoder.bitrate = new_bitrate_bps
+            except Exception as exc:  # noqa: BLE001
+                print(f"[WARN] Failed to set encoder bitrate for camera {self.index}: {exc}", file=sys.stderr)
+            applied.append(f"bitrate_mbps={new_bitrate_mbps}")
+
+        if cam_controls:
+            try:
+                self.camera.set_controls(cam_controls)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[WARN] Failed to apply runtime controls for camera {self.index}: {exc}", file=sys.stderr)
+
+        return applied
 
     def create_track(self) -> HardwareVideoTrack:
         return HardwareVideoTrack(self.broadcaster, self.description)
@@ -481,9 +925,10 @@ class SilenceAudioTrack(AudioStreamTrack):
 
 
 class WebRTCServer:
-    def __init__(self, capture: StereoHardwareCapture, ca_cert: Path | None = None):
+    def __init__(self, capture: StereoHardwareCapture, ca_cert: Path | None = None, config_path: Path = CONFIG_PATH):
         self.capture = capture
         self.ca_cert = ca_cert
+        self.config_path = config_path
         self.pcs: set[RTCPeerConnection] = set()
 
     async def index(self, request: web.Request) -> web.Response:
@@ -682,11 +1127,154 @@ class WebRTCServer:
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    async def get_settings(self, _request: web.Request) -> web.Response:
+        """GET /api/settings -- return current camera profile settings as JSON."""
+        try:
+            data = yaml.safe_load(self.config_path.read_text())
+            profiles = data.get("profiles", {})
+        except Exception as exc:  # noqa: BLE001
+            return web.Response(
+                status=500,
+                content_type="application/json",
+                text=json.dumps({"error": f"Failed to read config: {exc}"}),
+            )
+        result: Dict[str, dict] = {}
+        for cam_name in ("cam0", "cam1"):
+            profile = profiles.get(cam_name, {})
+            result[cam_name] = {
+                "description": profile.get("description", ""),
+                "resolution": profile.get("resolution", [2304, 1296]),
+                "rotation": profile.get("rotation", 0),
+                "hflip": profile.get("hflip", False),
+                "vflip": profile.get("vflip", False),
+                "crop": profile.get("crop", [1000, 1000]),
+                "offset_x": profile.get("offset_x", 0),
+                "offset_y": profile.get("offset_y", 0),
+                "awb_enable": profile.get("awb_enable", True),
+                "awb_mode": profile.get("awb_mode", "auto"),
+                "colour_gains": profile.get("colour_gains", [1.0, 1.0]),
+                "bitrate_mbps": profile.get("bitrate_mbps", 10.0),
+            }
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps(result),
+        )
+
+    async def post_settings(self, request: web.Request) -> web.Response:
+        """POST /api/settings -- apply and/or save updated camera settings."""
+        try:
+            updates = await request.json()
+        except Exception as exc:  # noqa: BLE001
+            return web.Response(
+                status=400,
+                content_type="application/json",
+                text=json.dumps({"error": f"Invalid JSON: {exc}"}),
+            )
+
+        if not isinstance(updates, dict):
+            return web.Response(
+                status=400,
+                content_type="application/json",
+                text=json.dumps({"error": "Expected JSON object with cam0/cam1 keys"}),
+            )
+
+        try:
+            data = yaml.safe_load(self.config_path.read_text())
+        except Exception as exc:  # noqa: BLE001
+            return web.Response(
+                status=500,
+                content_type="application/json",
+                text=json.dumps({"error": f"Failed to read config: {exc}"}),
+            )
+
+        profiles = data.get("profiles", {})
+        runtime_applied: list[str] = []
+        restart_needed = False
+        cam_map = {"cam0": self.capture.left, "cam1": self.capture.right}
+
+        for cam_name in ("cam0", "cam1"):
+            cam_updates = updates.get(cam_name)
+            if not cam_updates or not isinstance(cam_updates, dict):
+                continue
+
+            cam = cam_map.get(cam_name)
+            profile = profiles.get(cam_name, {})
+
+            runtime_changes: dict = {}
+            restart_changes: dict = {}
+            for key, value in cam_updates.items():
+                if key in RUNTIME_SETTINGS:
+                    runtime_changes[key] = value
+                elif key in RESTART_SETTINGS:
+                    restart_changes[key] = value
+
+            if runtime_changes and cam:
+                applied = cam.apply_runtime_settings(runtime_changes)
+                runtime_applied.extend([f"{cam_name}.{a}" for a in applied])
+
+            for key, value in cam_updates.items():
+                if key in RUNTIME_SETTINGS or key in RESTART_SETTINGS:
+                    profile[key] = value
+
+            if restart_changes:
+                restart_needed = True
+
+            profiles[cam_name] = profile
+
+        data["profiles"] = profiles
+        try:
+            self.config_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
+        except Exception as exc:  # noqa: BLE001
+            return web.Response(
+                status=500,
+                content_type="application/json",
+                text=json.dumps({"error": f"Failed to write config: {exc}"}),
+            )
+
+        result = {
+            "ok": True,
+            "runtime_applied": runtime_applied,
+            "restart_needed": restart_needed,
+        }
+        if restart_needed:
+            result["message"] = "Settings saved. Server restart required for resolution/rotation/crop changes."
+        else:
+            result["message"] = "Settings applied."
+
+        print(f"[INFO] Settings updated: runtime={runtime_applied}, restart_needed={restart_needed}", flush=True)
+
+        return web.Response(
+            content_type="application/json",
+            text=json.dumps(result),
+        )
+
+
+def _first_existing(patterns: Tuple[str, ...]) -> Optional[Path]:
+    for pattern in patterns:
+        for candidate in sorted(CERT_DIR.glob(pattern)):
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def discover_tls_assets() -> Tuple[Optional[Path], Optional[Path], Optional[Path]]:
+    """Return (cert, key, ca_cert) from the certs/ directory if available."""
+    cert = _first_existing(("*-server.crt", "*_server.crt", "server.crt"))
+    key = _first_existing(("*-server.key", "*_server.key", "server.key"))
+    ca = _first_existing(("*-ca.crt", "*_ca.crt", "ca.crt"))
+    return cert, key, ca
+
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="0.0.0.0", help="Host/IP to bind (use 0.0.0.0 for all interfaces)")
     parser.add_argument("--port", type=int, default=8443, help="HTTP/WebSocket port for signaling")
+    parser.add_argument(
+        "--http-port",
+        type=int,
+        default=0,
+        help="Optional HTTP fallback port for downloading certificates (0 disables; defaults to 8080 when TLS is on)",
+    )
     parser.add_argument("--config", type=Path, default=CONFIG_PATH, help="Path to calibration profiles")
     parser.add_argument("--framerate", type=int, default=56, help="Capture framerate for both cameras")
     parser.add_argument(
@@ -720,13 +1308,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Path to CA certificate (PEM) to expose for download at /ca.crt",
     )
+    parser.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        default=False,
+        help="Skip the camera pre-flight health checks on startup",
+    )
     return parser
 
 
 def main() -> None:
     args = build_arg_parser().parse_args()
 
-    ca_cert_path: Path | None = None
+    cert_path: Path | None = args.cert.expanduser() if args.cert else None
+    key_path: Path | None = args.key.expanduser() if args.key else None
+    ca_cert_path: Path | None = args.ca_cert.expanduser() if args.ca_cert else None
     resolution_override: Optional[Tuple[int, int]] = None
 
     if args.resolution:
@@ -735,54 +1331,87 @@ def main() -> None:
         except ValueError as exc:
             print(f"[ERROR] {exc}", file=sys.stderr)
             sys.exit(1)
-    if args.ca_cert:
-        ca_cert_path = args.ca_cert.expanduser()
-        if not ca_cert_path.exists():
-            print(f"[ERROR] CA certificate not found: {ca_cert_path}", file=sys.stderr)
+
+    auto_cert, auto_key, auto_ca = discover_tls_assets()
+
+    if cert_path and not key_path:
+        print("[ERROR] --cert provided without --key", file=sys.stderr)
+        sys.exit(1)
+    if key_path and not cert_path:
+        print("[ERROR] --key provided without --cert", file=sys.stderr)
+        sys.exit(1)
+
+    if cert_path is None and key_path is None and auto_cert and auto_key:
+        cert_path, key_path = auto_cert, auto_key
+        print(f"[INFO] Using TLS certificate: {cert_path}", flush=True)
+        print(f"[INFO] Using TLS private key: {key_path}", flush=True)
+
+    if ca_cert_path is None and auto_ca:
+        ca_cert_path = auto_ca
+        print(f"[INFO] Exposing CA certificate at /ca.crt: {ca_cert_path}", flush=True)
+
+    for label, path in (("TLS certificate", cert_path), ("TLS private key", key_path), ("CA certificate", ca_cert_path)):
+        if path and not path.exists():
+            print(f"[ERROR] {label} not found: {path}", file=sys.stderr)
             sys.exit(1)
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    # --- Pre-flight camera health checks ---
+    if args.skip_preflight:
+        print("[INFO] Skipping camera pre-flight checks (--skip-preflight).", flush=True)
+    elif PICAMERA2_AVAILABLE:
+        if not preflight_camera_check():
+            print(
+                "\n[ERROR] Camera pre-flight checks failed. "
+                "Resolve the issues above before starting the server.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+    else:
+        print(
+            "[WARN] picamera2 not available; skipping camera pre-flight checks "
+            "(hardware encoding will not work without it).",
+            flush=True,
+        )
+
+    exit_code = asyncio.run(
+        run_streamer(
+            args=args,
+            cert_path=cert_path,
+            key_path=key_path,
+            ca_cert_path=ca_cert_path,
+            resolution_override=resolution_override,
+        )
+    )
+    sys.exit(exit_code)
+
+
+async def run_streamer(
+    args: argparse.Namespace,
+    cert_path: Optional[Path],
+    key_path: Optional[Path],
+    ca_cert_path: Optional[Path],
+    resolution_override: Optional[Tuple[int, int]],
+) -> int:
+    loop = asyncio.get_running_loop()
     try:
         capture = StereoHardwareCapture(args.config, args.framerate, loop, resolution_override)
     except Exception as exc:  # noqa: BLE001
         print(f"[ERROR] Unable to start capture: {exc}", file=sys.stderr)
-        sys.exit(1)
+        return 1
 
-    server = WebRTCServer(capture, ca_cert_path)
+    server = WebRTCServer(capture, ca_cert_path, config_path=args.config)
     app = web.Application()
     app["rtc_server"] = server
     app.router.add_get("/", server.index)
     app.router.add_post("/offer", server.offer)
+    app.router.add_get("/api/settings", server.get_settings)
+    app.router.add_post("/api/settings", server.post_settings)
     app.router.add_static("/static/", STATIC_DIR, show_index=True)
     if ca_cert_path:
         app.router.add_get("/ca.crt", server.serve_ca_certificate)
 
-    semaphore = asyncio.Semaphore()
-
-    async def shutdown(app_: web.Application) -> None:
-        async with semaphore:
-            await server.cleanup()
-            capture.shutdown()
-
-    app.on_shutdown.append(shutdown)
-
-    # Signal handling is done via web.run_app() shutdown
-    # No manual signal handlers needed - aiohttp handles SIGINT/SIGTERM gracefully
-
     ssl_context = None
-    if args.cert or args.key:
-        if not (args.cert and args.key):
-            print("[ERROR] --cert and --key must be provided together for HTTPS", file=sys.stderr)
-            sys.exit(1)
-        cert_path = args.cert.expanduser()
-        key_path = args.key.expanduser()
-        if not cert_path.exists():
-            print(f"[ERROR] TLS certificate not found: {cert_path}", file=sys.stderr)
-            sys.exit(1)
-        if not key_path.exists():
-            print(f"[ERROR] TLS private key not found: {key_path}", file=sys.stderr)
-            sys.exit(1)
+    if cert_path and key_path:
         try:
             ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ssl_context.load_cert_chain(
@@ -792,9 +1421,79 @@ def main() -> None:
             )
         except Exception as exc:  # noqa: BLE001
             print(f"[ERROR] Failed to load TLS certificate/key: {exc}", file=sys.stderr)
-            sys.exit(1)
+            return 1
+        print_tls_loaded(cert_path, key_path)
+    elif cert_path or key_path:
+        print("[ERROR] --cert and --key must be provided together for HTTPS", file=sys.stderr)
+        return 1
 
-    web.run_app(app, host=args.host, port=args.port, ssl_context=ssl_context)
+    fallback_http_port = args.http_port
+    if ssl_context and fallback_http_port == 0:
+        fallback_http_port = 8080
+
+    if ssl_context and fallback_http_port and fallback_http_port == args.port:
+        print("[ERROR] HTTP fallback port cannot match HTTPS port", file=sys.stderr)
+        capture.shutdown()
+        return 1
+
+    runner = web.AppRunner(app)
+    try:
+        await runner.setup()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ERROR] Failed to start web server: {exc}", file=sys.stderr)
+        capture.shutdown()
+        return 1
+
+    async def start_site(port: int, ssl_ctx: Optional[ssl.SSLContext]) -> None:
+        scheme = "https" if ssl_ctx else "http"
+        bind_host = args.host
+        if bind_host in {"0.0.0.0", "::"}:
+            bind_host = "0.0.0.0"
+        site = web.TCPSite(runner, host=args.host, port=port, ssl_context=ssl_ctx)
+        await site.start()
+        print(f"[INFO] Serving {scheme.upper()} on {scheme}://{bind_host}:{port}/", flush=True)
+
+    try:
+        if ssl_context:
+            await start_site(args.port, ssl_context)
+            if fallback_http_port:
+                await start_site(fallback_http_port, None)
+                print("[INFO] HTTP fallback exposes /ca.crt before trusting HTTPS.", flush=True)
+        else:
+            await start_site(args.port, None)
+            if fallback_http_port and fallback_http_port != args.port:
+                await start_site(fallback_http_port, None)
+
+        stop_event = asyncio.Event()
+        signals = (signal.SIGINT, signal.SIGTERM)
+        for sig in signals:
+            try:
+                loop.add_signal_handler(sig, stop_event.set)
+            except NotImplementedError:
+                pass
+
+        scheme = "https" if ssl_context else "http"
+        print_ready_banner(
+            host=args.host,
+            port=args.port,
+            scheme=scheme,
+            cert_dir=cert_path.parent if cert_path else None,
+        )
+        try:
+            await stop_event.wait()
+        except asyncio.CancelledError:
+            pass
+    finally:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.remove_signal_handler(sig)
+            except (NotImplementedError, RuntimeError):
+                pass
+        await server.cleanup()
+        await runner.cleanup()
+        capture.shutdown()
+
+    return 0
 
 
 if __name__ == "__main__":

@@ -137,11 +137,8 @@ Run the WebRTC server with your own certificate to avoid tunnelling through ngro
    ```
    The helper asks for the hostname, optional `.local`/extra SAN entries, and writes everything under the chosen directory (default `certs/`). It prints the exact `make stream-webrtc` command to run afterward.
 2. Copy the reported `*-ca.crt` file to the Quest (USB cable or cloud sync) and install it as a trusted credential (Settings → Security → Install certificates → CA certificate). Reboot the headset so WebXR can trust the issuer.
-3. Launch the streamer with HTTPS enabled using the command emitted by the helper (for example):
-   ```bash
-   make stream-webrtc ARGS="--host 0.0.0.0 --port 8443 --cert certs/rpi-vr-camera-server.crt --key certs/rpi-vr-camera-server.key --ca-cert certs/dev-ca.crt"
-   ```
-   The server now exposes `https://HOSTNAME:8443/` using your self-signed chain and publishes the CA certificate at `https://HOSTNAME:8443/ca.crt` for easy download. Devices that trust the CA will connect without TLS warnings.
+3. Launch the streamer; it now auto-detects TLS assets under `certs/`, so a plain `make stream-webrtc` enables HTTPS when the files are present (override paths with `ARGS="--cert ... --key ... --ca-cert ..."` if needed).
+   The server exposes `https://HOSTNAME:8443/` and publishes the CA certificate at `https://HOSTNAME:8443/ca.crt`. When HTTPS is active it also opens `http://HOSTNAME:8080/` by default so you can fetch `http://HOSTNAME:8080/ca.crt` from the Quest/phone before trusting the secure endpoint (change/disable via `ARGS="--http-port <port|0>"`). Devices that trust the CA will connect without TLS warnings.
 
 If you prefer to run `openssl` yourself, the helper essentially automates the following sequence (shown here for reference):
 

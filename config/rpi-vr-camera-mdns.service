@@ -1,0 +1,22 @@
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+
+<!--
+  Avahi/mDNS service definition for rpi-vr-camera.
+  Advertises the WebRTC/HTTPS streaming server so clients can reach
+  the Pi at  https://rpi-vr-camera.local:8443  without knowing the IP.
+
+  Installed by:  make install-mdns
+  Removed  by:  make uninstall-mdns
+-->
+
+<service-group>
+  <name replace-wildcards="yes">rpi-vr-camera on %h</name>
+
+  <service>
+    <type>_https._tcp</type>
+    <port>8443</port>
+    <txt-record>path=/</txt-record>
+    <txt-record>description=Raspberry Pi VR Camera WebRTC stream</txt-record>
+  </service>
+</service-group>

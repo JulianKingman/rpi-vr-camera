@@ -24,7 +24,7 @@ CAPTURE_TIMEOUT := --timeout $(TIMEOUT)
 CAPTURE_KEYPRESS := $(if $(filter 0,$(KEYPRESS)),,--keypress)
 SETPTS_EXPR := N/($(FRAMERATE)*TB)
 
-.PHONY: help system-deps python-deps preview capture capture-left capture-right convert convert-left convert-right capture-stereo calibration-ui stream-preview stream-cast stream-webrtc stream-webrtc-gst prompt-test tls-certs
+.PHONY: help system-deps python-deps preview capture capture-left capture-right convert convert-left convert-right capture-stereo calibration-ui stream-preview stream-cast stream-webrtc stream-webrtc-gst prompt-test tls-certs install-service uninstall-service service-logs service-status install-mdns uninstall-mdns
 
 help:
 	@echo "Available targets:"
@@ -38,6 +38,12 @@ help:
 	@echo "  make stream-webrtc    # launch WebRTC/WebXR server (requires browser client)"
 	@echo "  make stream-webrtc-gst # launch GStreamer-based WebRTC pipeline (option 3 prototype)"
 	@echo "  make tls-certs        # interactive helper for HTTPS certificates"
+	@echo "  make install-service  # install, enable, and start the systemd service"
+	@echo "  make uninstall-service # stop, disable, and remove the systemd service"
+	@echo "  make service-logs     # view live journal logs for the service"
+	@echo "  make service-status   # show systemd service status"
+	@echo "  make install-mdns     # advertise as rpi-vr-camera.local via Avahi/mDNS"
+	@echo "  make uninstall-mdns   # remove mDNS advertisement"
 	@echo "Variables: CAMERA, RESOLUTION, PREVIEW, METADATA, FRAMERATE, WIDTH, HEIGHT, OUTPUT, PTS"
 
 system-deps:
@@ -173,3 +179,78 @@ prompt-test:
 
 tls-certs:
 	$(PYTHON) scripts/generate_tls_certs.py
+
+# --- systemd service targets ---
+
+SERVICE_NAME := rpi-vr-camera
+SERVICE_FILE := config/rpi-vr-camera.service
+SYSTEMD_DIR := /etc/systemd/system
+
+install-service:
+	@if [ ! -f $(SERVICE_FILE) ]; then \
+		echo "Service file not found: $(SERVICE_FILE)"; \
+		exit 1; \
+	fi
+	@if [ ! -x .venv/bin/python3 ]; then \
+		echo "Virtualenv missing. Run 'make python-deps' first."; \
+		exit 1; \
+	fi
+	@echo "Installing systemd service $(SERVICE_NAME)..."
+	sudo cp $(SERVICE_FILE) $(SYSTEMD_DIR)/$(SERVICE_NAME).service
+	sudo systemctl daemon-reload
+	sudo systemctl enable $(SERVICE_NAME).service
+	sudo systemctl start $(SERVICE_NAME).service
+	@echo "Service installed and started. Check status with: make service-status"
+
+uninstall-service:
+	@echo "Stopping and removing systemd service $(SERVICE_NAME)..."
+	-sudo systemctl stop $(SERVICE_NAME).service
+	-sudo systemctl disable $(SERVICE_NAME).service
+	-sudo rm -f $(SYSTEMD_DIR)/$(SERVICE_NAME).service
+	sudo systemctl daemon-reload
+	@echo "Service removed."
+
+service-logs:
+	sudo journalctl -u $(SERVICE_NAME).service -f
+
+service-status:
+	sudo systemctl status $(SERVICE_NAME).service
+
+# --- mDNS/Avahi targets ---
+
+MDNS_SERVICE_SRC := config/rpi-vr-camera-mdns.service
+MDNS_SERVICE_DST := /etc/avahi/services/rpi-vr-camera.service
+MDNS_HOSTNAME    := rpi-vr-camera
+
+install-mdns:
+	@echo "==> Installing mDNS/Avahi service advertisement..."
+	@if ! dpkg -s avahi-daemon >/dev/null 2>&1; then \
+		echo "    Installing avahi-daemon..."; \
+		sudo apt-get update -qq && sudo apt-get install -y -qq avahi-daemon; \
+	else \
+		echo "    avahi-daemon already installed."; \
+	fi
+	@echo "    Copying service file to $(MDNS_SERVICE_DST)"
+	sudo cp $(MDNS_SERVICE_SRC) $(MDNS_SERVICE_DST)
+	@current=$$(hostname); \
+	if [ "$$current" != "$(MDNS_HOSTNAME)" ]; then \
+		echo "    Setting hostname to $(MDNS_HOSTNAME) (was $$current)..."; \
+		sudo hostnamectl set-hostname $(MDNS_HOSTNAME); \
+	else \
+		echo "    Hostname already set to $(MDNS_HOSTNAME)."; \
+	fi
+	sudo systemctl enable avahi-daemon
+	sudo systemctl restart avahi-daemon
+	@echo "==> Done. This Pi is now reachable at https://$(MDNS_HOSTNAME).local:8443"
+
+uninstall-mdns:
+	@echo "==> Removing mDNS/Avahi service advertisement..."
+	@if [ -f $(MDNS_SERVICE_DST) ]; then \
+		sudo rm -f $(MDNS_SERVICE_DST); \
+		echo "    Removed $(MDNS_SERVICE_DST)"; \
+	else \
+		echo "    $(MDNS_SERVICE_DST) not found (already removed)."; \
+	fi
+	sudo systemctl restart avahi-daemon
+	@echo "==> Done. Service advertisement removed."
+	@echo "    Note: hostname was NOT reverted. Use 'sudo hostnamectl set-hostname <name>' to change it."

@@ -1,0 +1,34 @@
+[Unit]
+Description=RPi VR Camera WebRTC Streaming Server
+Documentation=https://github.com/buishi/rpi-vr-camera
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=buishi
+Group=buishi
+WorkingDirectory=/home/buishi/Documents/rpi-vr-camera
+ExecStart=/home/buishi/Documents/rpi-vr-camera/.venv/bin/python3 \
+    /home/buishi/Documents/rpi-vr-camera/scripts/webrtc_stream.py \
+    --host 0.0.0.0 \
+    --port 8443 \
+    --framerate 56
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+
+# Give the server time to release camera resources before restarting
+TimeoutStopSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rpi-vr-camera
+
+# Environment
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

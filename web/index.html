@@ -107,6 +107,118 @@
         min-height: 1.4em;
       }
 
+      /* ── Connection overlay ── */
+      .preview {
+        position: relative;
+      }
+      #connectionOverlay {
+        display: none;
+        position: absolute;
+        inset: 0;
+        z-index: 100;
+        background: rgba(0, 0, 0, 0.85);
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        border-radius: 8px;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        min-height: 200px;
+        transition: opacity 0.4s ease;
+        opacity: 1;
+      }
+      #connectionOverlay.visible {
+        display: flex;
+      }
+      #connectionOverlay.fade-out {
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      /* Spinner */
+      .spinner {
+        width: 48px;
+        height: 48px;
+        border: 3px solid rgba(255, 255, 255, 0.1);
+        border-top-color: #2979ff;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      .spinner.error {
+        border-top-color: #ef5350;
+        animation: none;
+      }
+      .spinner.success {
+        border-color: #66bb6a;
+        border-top-color: #66bb6a;
+        animation: none;
+      }
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+
+      /* Connection step text */
+      #connectionStep {
+        font-size: 14px;
+        font-weight: 500;
+        color: #ccc;
+        text-align: center;
+        letter-spacing: 0.2px;
+      }
+
+      /* Progress steps */
+      .progress-steps {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        margin-top: 4px;
+      }
+      .progress-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.15);
+        transition: background 0.3s ease, transform 0.3s ease;
+      }
+      .progress-dot.active {
+        background: #2979ff;
+        transform: scale(1.25);
+      }
+      .progress-dot.done {
+        background: #66bb6a;
+      }
+      .progress-dot.error {
+        background: #ef5350;
+      }
+
+      /* Error state */
+      #connectionError {
+        display: none;
+        font-size: 12px;
+        color: #ef5350;
+        text-align: center;
+        max-width: 320px;
+        line-height: 1.5;
+        word-break: break-word;
+      }
+      #retryButton {
+        display: none;
+        padding: 8px 24px;
+        font-size: 13px;
+        font-weight: 500;
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 6px;
+        background: rgba(41, 121, 255, 0.15);
+        color: #64b5f6;
+        cursor: pointer;
+        transition: background 0.15s, border-color 0.15s;
+      }
+      #retryButton:hover {
+        background: rgba(41, 121, 255, 0.3);
+        border-color: rgba(100, 181, 246, 0.4);
+      }
+
       canvas#xrCanvas { display: none; }
 
       /* ── HUD overlay ── */
@@ -220,6 +332,195 @@
       .h-yellow { color: #ffa726; }
       .h-red { color: #ef5350; }
       .h-dim { color: #555; }
+
+      /* ── Settings button ── */
+      #settingsButton {
+        background: rgba(255, 255, 255, 0.08);
+        color: #aaa;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        padding: 8px 12px;
+        font-size: 15px;
+        line-height: 1;
+      }
+      #settingsButton:hover:not(:disabled) {
+        background: rgba(255, 255, 255, 0.15);
+        color: #ddd;
+      }
+
+      /* ── Settings modal ── */
+      #settingsOverlay {
+        display: none;
+        position: fixed;
+        inset: 0;
+        z-index: 10000;
+        background: rgba(0, 0, 0, 0.7);
+        backdrop-filter: blur(4px);
+        -webkit-backdrop-filter: blur(4px);
+        justify-content: center;
+        align-items: flex-start;
+        padding: 40px 16px;
+        overflow-y: auto;
+      }
+      #settingsOverlay.open { display: flex; }
+      #settingsPanel2 {
+        background: #1a1a1a;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 12px;
+        padding: 24px;
+        width: 100%;
+        max-width: 600px;
+        color: #e0e0e0;
+        font-size: 13px;
+      }
+      #settingsPanel2 h2 {
+        margin: 0 0 16px;
+        font-size: 16px;
+        font-weight: 600;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .settings-close {
+        background: none;
+        border: none;
+        color: #888;
+        font-size: 20px;
+        cursor: pointer;
+        padding: 0 4px;
+        line-height: 1;
+      }
+      .settings-close:hover { color: #ddd; }
+      .settings-cam-section {
+        margin-bottom: 20px;
+        padding: 14px;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 8px;
+      }
+      .settings-cam-section h3 {
+        margin: 0 0 12px;
+        font-size: 13px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: #888;
+      }
+      .settings-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 10px;
+      }
+      .settings-row:last-child { margin-bottom: 0; }
+      .settings-label {
+        min-width: 100px;
+        font-size: 12px;
+        color: #999;
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+      }
+      .settings-input {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .settings-input input[type="number"],
+      .settings-input select {
+        font-family: inherit;
+        font-size: 13px;
+        padding: 5px 8px;
+        border-radius: 5px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(255, 255, 255, 0.06);
+        color: #ccc;
+        outline: none;
+        width: 90px;
+      }
+      .settings-input input[type="number"]:focus,
+      .settings-input select:focus {
+        border-color: rgba(255, 255, 255, 0.3);
+      }
+      .settings-input input[type="range"] {
+        flex: 1;
+        min-width: 80px;
+        accent-color: #2979ff;
+      }
+      .settings-input .range-value {
+        min-width: 36px;
+        font-size: 12px;
+        color: #888;
+        text-align: right;
+        font-family: ui-monospace, monospace;
+      }
+      .settings-input select {
+        width: auto;
+        min-width: 120px;
+      }
+      .settings-tag {
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        padding: 1px 5px;
+        border-radius: 3px;
+        color: #888;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        white-space: nowrap;
+      }
+      .settings-tag.runtime { color: #66bb6a; border-color: rgba(102, 187, 106, 0.3); }
+      .settings-tag.restart { color: #ffa726; border-color: rgba(255, 167, 38, 0.3); }
+      .settings-actions {
+        display: flex;
+        gap: 10px;
+        justify-content: flex-end;
+        margin-top: 16px;
+      }
+      .settings-actions button {
+        padding: 8px 20px;
+        font-size: 13px;
+        font-weight: 500;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+      #settingsApplyBtn {
+        background: #2979ff;
+        color: #fff;
+      }
+      #settingsApplyBtn:hover { background: #448aff; }
+      #settingsApplyBtn:disabled { opacity: 0.5; cursor: not-allowed; }
+      #settingsCancelBtn {
+        background: rgba(255, 255, 255, 0.08);
+        color: #aaa;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+      }
+      #settingsCancelBtn:hover { background: rgba(255, 255, 255, 0.15); color: #ddd; }
+      #settingsFeedback {
+        margin-top: 12px;
+        padding: 8px 12px;
+        border-radius: 6px;
+        font-size: 12px;
+        display: none;
+      }
+      #settingsFeedback.success {
+        display: block;
+        background: rgba(102, 187, 106, 0.15);
+        border: 1px solid rgba(102, 187, 106, 0.3);
+        color: #66bb6a;
+      }
+      #settingsFeedback.warning {
+        display: block;
+        background: rgba(255, 167, 38, 0.15);
+        border: 1px solid rgba(255, 167, 38, 0.3);
+        color: #ffa726;
+      }
+      #settingsFeedback.error {
+        display: block;
+        background: rgba(239, 83, 80, 0.15);
+        border: 1px solid rgba(239, 83, 80, 0.3);
+        color: #ef5350;
+      }
     </style>
   </head>
   <body>
@@ -227,20 +528,54 @@
       <h1>VR Camera Preview</h1>
       <p>
         WebRTC stereo stream from Raspberry Pi.
-        On Quest, open <code>https://&lt;pi-ip&gt;:8443</code> after installing the CA cert.
+        On Quest, open <code>https://rpi-vr-camera.local:8443</code>
+        (or <code>https://&lt;pi-ip&gt;:8443</code>) after installing the CA cert.
+        Run <code>make install-mdns</code> on the Pi to enable the <code>.local</code> hostname.
       </p>
     </header>
     <p id="caSection" style="display:none;">
       <a id="caLink" href="/ca.crt" download>Download CA certificate</a>
     </p>
     <div class="controls">
-      <button id="startButton">Start Stream</button>
+      <button id="startButton" style="display:none;">Reconnect</button>
       <button id="stopButton" disabled>Stop</button>
       <button id="enterVrButton" disabled>Enter VR</button>
+      <button id="settingsButton" title="Camera Settings">&#9881;</button>
     </div>
+
+    <!-- Settings modal -->
+    <div id="settingsOverlay">
+      <div id="settingsPanel2">
+        <h2>
+          Camera Settings
+          <button class="settings-close" id="settingsCloseBtn" type="button">&times;</button>
+        </h2>
+        <div id="settingsCamForms">
+          <!-- Populated by JS -->
+        </div>
+        <div class="settings-actions">
+          <button id="settingsCancelBtn" type="button">Cancel</button>
+          <button id="settingsApplyBtn" type="button">Apply</button>
+        </div>
+        <div id="settingsFeedback"></div>
+      </div>
+    </div>
+
     <div class="preview">
       <video id="leftVideo" playsinline autoplay muted></video>
       <video id="rightVideo" playsinline autoplay muted style="display:none;"></video>
+      <div id="connectionOverlay">
+        <div class="spinner" id="overlaySpinner"></div>
+        <div id="connectionStep">Initializing...</div>
+        <div class="progress-steps">
+          <div class="progress-dot" id="dot0"></div>
+          <div class="progress-dot" id="dot1"></div>
+          <div class="progress-dot" id="dot2"></div>
+          <div class="progress-dot" id="dot3"></div>
+        </div>
+        <div id="connectionError"></div>
+        <button id="retryButton" type="button">Retry Connection</button>
+      </div>
     </div>
     <canvas id="xrCanvas"></canvas>
     <div id="status"></div>
@@ -283,6 +618,11 @@
       const copyHudButton = $("copyHudButton");
       const xrCanvas = $("xrCanvas");
       const caSection = $("caSection");
+      const connectionOverlay = $("connectionOverlay");
+      const overlaySpinner = $("overlaySpinner");
+      const connectionStep = $("connectionStep");
+      const connectionError = $("connectionError");
+      const retryButton = $("retryButton");
 
       if (caSection) {
         fetch("/ca.crt", { method: "HEAD" })
@@ -307,11 +647,70 @@
       let leftStream = null;
       let rightStream = null;
       let latencyDc = null;
+      let userInitiatedStop = false;
 
       const receiverTuning = {
         jitterBufferTargetS: 0.01,
         playoutDelayHintS: 0.0,
       };
+
+      /* ── Auto-connect retry state ── */
+      let autoConnectTimer = null;
+      let autoConnectAttempt = 0;
+      const AUTO_CONNECT_MAX_DELAY_MS = 10000;
+      const AUTO_CONNECT_BASE_DELAY_MS = 1000;
+
+      function cancelAutoConnect() {
+        if (autoConnectTimer != null) {
+          clearTimeout(autoConnectTimer);
+          autoConnectTimer = null;
+        }
+      }
+
+      function resetAutoConnectAttempt() {
+        autoConnectAttempt = 0;
+      }
+
+      function scheduleAutoConnect(errorMsg) {
+        // Clean up any partial connection state
+        if (pc) { try { pc.close(); } catch {} pc = null; }
+        if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+        if (leftStream) { leftStream.getTracks().forEach((t) => t.stop()); leftStream = null; }
+        if (rightStream) { rightStream.getTracks().forEach((t) => t.stop()); rightStream = null; }
+        leftVideo.srcObject = null;
+        rightVideo.srcObject = null;
+        rightVideo.style.display = "none";
+
+        const delay = Math.min(
+          AUTO_CONNECT_BASE_DELAY_MS * Math.pow(2, autoConnectAttempt),
+          AUTO_CONNECT_MAX_DELAY_MS
+        );
+        autoConnectAttempt++;
+
+        // Update overlay to show retry countdown
+        overlaySpinner.classList.remove("success");
+        overlaySpinner.classList.add("error");
+        connectionStep.textContent = "Retrying in " + (delay / 1000).toFixed(0) + "s...";
+        connectionError.textContent = errorMsg;
+        connectionError.style.display = "block";
+        retryButton.style.display = "inline-block";
+        // Mark current dot as error
+        for (let i = 0; i < 4; i++) {
+          const dot = $("dot" + i);
+          if (dot.classList.contains("active")) {
+            dot.classList.remove("active");
+            dot.classList.add("error");
+          }
+        }
+        stopButton.disabled = true;
+
+        log("Server not ready. Retrying in " + (delay / 1000).toFixed(0) + "s...");
+
+        autoConnectTimer = setTimeout(() => {
+          autoConnectTimer = null;
+          startStream();
+        }, delay);
+      }
 
       /* ── Helpers ── */
 
@@ -330,7 +729,7 @@
       }
 
       function statRow(label, html) {
-        return `<div class="stat-label">${label}</div><div class="stat-value">${html}</div>`;
+        return '<div class="stat-label">' + label + '</div><div class="stat-value">' + html + '</div>';
       }
 
       function hudText() {
@@ -369,6 +768,102 @@
       }
 
       function log(message) { statusEl.textContent = message; }
+
+      /* ── Connection overlay management ── */
+
+      const CONNECTION_STEPS = [
+        "Negotiating WebRTC...",
+        "Establishing video tracks...",
+        "Buffering...",
+        "Connected",
+      ];
+
+      let connectionStepIndex = -1;
+
+      function showOverlay() {
+        connectionOverlay.classList.add("visible");
+        connectionOverlay.classList.remove("fade-out");
+        overlaySpinner.classList.remove("error", "success");
+        connectionError.style.display = "none";
+        retryButton.style.display = "none";
+        connectionStepIndex = -1;
+        // Reset all dots
+        for (let i = 0; i < 4; i++) {
+          const dot = $("dot" + i);
+          dot.classList.remove("active", "done", "error");
+        }
+        setConnectionStep(0);
+      }
+
+      function hideOverlay() {
+        connectionOverlay.classList.add("fade-out");
+        setTimeout(() => {
+          connectionOverlay.classList.remove("visible", "fade-out");
+        }, 400);
+      }
+
+      function setConnectionStep(index) {
+        if (index <= connectionStepIndex) return;
+        // Mark previous steps as done
+        for (let i = 0; i <= connectionStepIndex; i++) {
+          $("dot" + i).classList.remove("active");
+          $("dot" + i).classList.add("done");
+        }
+        connectionStepIndex = index;
+        if (index < CONNECTION_STEPS.length) {
+          connectionStep.textContent = CONNECTION_STEPS[index];
+          $("dot" + index).classList.add("active");
+        }
+      }
+
+      function showOverlaySuccess() {
+        // Mark all dots as done
+        for (let i = 0; i < 4; i++) {
+          const dot = $("dot" + i);
+          dot.classList.remove("active", "error");
+          dot.classList.add("done");
+        }
+        connectionStep.textContent = "Connected";
+        overlaySpinner.classList.remove("error");
+        overlaySpinner.classList.add("success");
+        // Fade out after a brief moment
+        setTimeout(() => hideOverlay(), 600);
+      }
+
+      function showOverlayError(errorMsg) {
+        overlaySpinner.classList.remove("success");
+        overlaySpinner.classList.add("error");
+        connectionStep.textContent = "Connection Failed";
+        connectionError.textContent = errorMsg;
+        connectionError.style.display = "block";
+        retryButton.style.display = "inline-block";
+        // Mark current dot as error
+        for (let i = 0; i < 4; i++) {
+          const dot = $("dot" + i);
+          if (dot.classList.contains("active")) {
+            dot.classList.remove("active");
+            dot.classList.add("error");
+          }
+        }
+      }
+
+      retryButton.addEventListener("click", () => {
+        // Cancel any pending auto-retry and start immediately
+        cancelAutoConnect();
+        resetAutoConnectAttempt();
+        // Clean up any remnants from the failed connection
+        if (pc) {
+          try { pc.close(); } catch {}
+          pc = null;
+        }
+        if (leftStream) { leftStream.getTracks().forEach((t) => t.stop()); leftStream = null; }
+        if (rightStream) { rightStream.getTracks().forEach((t) => t.stop()); rightStream = null; }
+        leftVideo.srcObject = null;
+        rightVideo.srcObject = null;
+        rightVideo.style.display = "none";
+        connectionOverlay.classList.remove("visible");
+        startStream();
+      });
 
       /* ── Latency / datachannel state ── */
 
@@ -449,9 +944,9 @@
               }
             });
             if (brParts.length) {
-              let brHtml = brParts.join(`<span class="sep">/</span>`);
+              let brHtml = brParts.join('<span class="sep">/</span>');
               brHtml += " Mbps";
-              if (availBwMbps != null) brHtml += `  <span class="h-dim">bw ${availBwMbps.toFixed(0)}</span>`;
+              if (availBwMbps != null) brHtml += '  <span class="h-dim">bw ' + availBwMbps.toFixed(0) + '</span>';
               html += statRow("Bitrate", brHtml);
             }
 
@@ -472,7 +967,7 @@
               fpsParts.push(`<span class="eye">${eyeLabel(mid, i)}</span><span class="${cls}">${fps.toFixed(1)}</span>`);
             });
             if (fpsParts.length) {
-              html += statRow("FPS", fpsParts.join(`<span class="sep">/</span>`) + ` <span class="h-dim">/ ${fpsTarget}</span>`);
+              html += statRow("FPS", fpsParts.join('<span class="sep">/</span>') + ' <span class="h-dim">/ ' + fpsTarget + '</span>');
             }
 
             // ── Resolution row ──
@@ -484,7 +979,7 @@
               }
             });
             if (resParts.length) {
-              html += statRow("Res", resParts.join(`<span class="sep">/</span>`));
+              html += statRow("Res", resParts.join('<span class="sep">/</span>'));
             }
 
             // ── Latency row ── (RTT + per-eye JB and decode)
@@ -512,8 +1007,8 @@
               const jbHtml = jbVals.map(v => {
                 const cls = hc(v.ms, [0, 20], [20, 60]);
                 return `<span class="eye">${v.eye}</span><span class="${cls}">${v.ms.toFixed(0)}ms</span>`;
-              }).join(`<span class="sep">/</span>`);
-              latParts.push(`<span class="h-dim">jb</span> ${jbHtml}`);
+              }).join('<span class="sep">/</span>');
+              latParts.push('<span class="h-dim">jb</span> ' + jbHtml);
             }
             // Per-eye decode (averaged)
             const decVals = [];
@@ -530,10 +1025,10 @@
             });
             if (decVals.length) {
               const avgDec = decVals.reduce((a, b) => a + b, 0) / decVals.length;
-              latParts.push(`<span class="h-dim">dec</span> ${avgDec.toFixed(1)}ms`);
+              latParts.push('<span class="h-dim">dec</span> ' + avgDec.toFixed(1) + 'ms');
             }
             if (latParts.length) {
-              html += statRow("Latency", latParts.join(`<span class="sep">&middot;</span>`));
+              html += statRow("Latency", latParts.join('<span class="sep">&middot;</span>'));
             }
 
             // ── Network row ── (aggregate jitter + per-eye loss)
@@ -564,17 +1059,17 @@
             const netParts = [];
             if (jitVals.length) {
               const maxJit = Math.max(...jitVals);
-              netParts.push(`<span class="h-dim">jit</span> ${maxJit.toFixed(0)}ms`);
+              netParts.push('<span class="h-dim">jit</span> ' + maxJit.toFixed(0) + 'ms');
             }
             if (lossVals.length) {
               const maxLoss = Math.max(...lossVals.map(v => v.pct));
               const cls = hc(maxLoss, [0, 0.1], [0.1, 1]);
               netParts.push(`<span class="${cls}">loss ${maxLoss.toFixed(2)}%</span>`);
             }
-            if (totalNack > 0) netParts.push(`<span class="h-dim">nack</span> ${(totalNack / elapsed).toFixed(1)}/s`);
-            if (totalPli > 0) netParts.push(`<span class="h-dim">pli</span> ${(totalPli / elapsed).toFixed(1)}/s`);
+            if (totalNack > 0) netParts.push('<span class="h-dim">nack</span> ' + (totalNack / elapsed).toFixed(1) + '/s');
+            if (totalPli > 0) netParts.push('<span class="h-dim">pli</span> ' + (totalPli / elapsed).toFixed(1) + '/s');
             if (netParts.length) {
-              html += statRow("Network", netParts.join(`<span class="sep">&middot;</span>`));
+              html += statRow("Network", netParts.join('<span class="sep">&middot;</span>'));
             }
 
             // ── Frame drops row (client-side) ──
@@ -589,7 +1084,7 @@
               }
             });
             if (dropParts.length) {
-              html += statRow("Drops", dropParts.join(`<span class="sep">/</span>`));
+              html += statRow("Drops", dropParts.join('<span class="sep">/</span>'));
             }
 
             // ── Server stats row ──
@@ -604,12 +1099,12 @@
                 if (dt > 0) {
                   const dB = (ss.bytesSent || 0) - (ps.bytesSent || 0);
                   const mbps = (dB * 8) / dt / 1_000_000;
-                  if (mbps > 0) parts.push(`${mbps.toFixed(1)}Mbps`);
+                  if (mbps > 0) parts.push(mbps.toFixed(1) + 'Mbps');
                   const dF = (ss.framesSent || 0) - (ps.framesSent || 0);
-                  if (dF > 0) parts.push(`${(dF / dt).toFixed(0)}fps`);
+                  if (dF > 0) parts.push((dF / dt).toFixed(0) + 'fps');
                 }
               }
-              if (typeof ss.keyFramesSent === "number") parts.push(`kf=${ss.keyFramesSent}`);
+              if (typeof ss.keyFramesSent === "number") parts.push('kf=' + ss.keyFramesSent);
               if (typeof ss.droppedFrames === "number" && ss.droppedFrames > 0) {
                 const cls = hc(ss.droppedFrames, [0, 0], [1, 3]);
                 parts.push(`<span class="${cls}">drop=${ss.droppedFrames}</span>`);
@@ -617,7 +1112,7 @@
               if (parts.length) srvParts.push(`<span class="eye">${eyeLabel(mid, mids.indexOf(mid))}</span>${parts.join(" ")}`);
             }
             if (srvParts.length) {
-              html += statRow("Server", srvParts.join(`<span class="sep">/</span>`));
+              html += statRow("Server", srvParts.join('<span class="sep">/</span>'));
             }
 
             statsPanel.innerHTML = html || statRow("", '<span class="h-dim">waiting for data...</span>');
@@ -631,7 +1126,11 @@
       /* ── Stream lifecycle ── */
 
       async function stopStream(message) {
+        userInitiatedStop = true;
+        cancelAutoConnect();
+        resetAutoConnectAttempt();
         stopButton.disabled = true;
+        startButton.style.display = "";
         startButton.disabled = false;
         enterVrButton.disabled = true;
 
@@ -655,12 +1154,17 @@
         leftVideo.srcObject = null;
         rightVideo.srcObject = null;
         rightVideo.style.display = "none";
+        hideOverlay();
         log(message || "Stream stopped.");
       }
 
       async function startStream() {
+        userInitiatedStop = false;
+        cancelAutoConnect();
         startButton.disabled = true;
+        startButton.style.display = "none";
         stopButton.disabled = false;
+        showOverlay();
         log("Connecting...");
 
         leftStream = null;
@@ -722,12 +1226,14 @@
             leftStream = stream;
             leftVideo.srcObject = leftStream;
             leftVideo.play().catch((e) => console.warn("left play() failed", e));
+            setConnectionStep(2); // Buffering...
             log("Left eye connected.");
           } else if (!rightStream) {
             rightStream = stream;
             rightVideo.srcObject = rightStream;
             rightVideo.style.display = "block";
             rightVideo.play().catch((e) => console.warn("right play() failed", e));
+            setConnectionStep(2); // Buffering...
             log("Both eyes connected.");
           } else {
             rightStream.getTracks().forEach((t) => t.stop());
@@ -744,9 +1250,23 @@
         });
 
         pc.addEventListener("connectionstatechange", () => {
-          if (pc.connectionState === "connected") log("Connected.");
-          else if (pc.connectionState === "failed" || pc.connectionState === "closed") stopStream(`Connection ${pc.connectionState}.`);
-          else log(`${pc.connectionState}...`);
+          if (pc.connectionState === "connected") {
+            resetAutoConnectAttempt();
+            setConnectionStep(3); // Connected
+            showOverlaySuccess();
+            startButton.style.display = "none";
+            log("Connected.");
+          } else if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+            if (!userInitiatedStop) {
+              // Auto-retry on unexpected connection failure
+              scheduleAutoConnect("Connection " + pc.connectionState + ".");
+            }
+          } else if (pc.connectionState === "connecting") {
+            setConnectionStep(1); // Establishing video tracks...
+            log("connecting...");
+          } else {
+            log(pc.connectionState + "...");
+          }
         });
 
         pc.addTransceiver("video", { direction: "recvonly" });
@@ -755,6 +1275,7 @@
 
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
+        setConnectionStep(1); // Establishing video tracks...
         monitorConnection(pc);
 
         let response;
@@ -765,15 +1286,21 @@
             body: JSON.stringify(pc.localDescription),
           });
         } catch (err) {
-          await stopStream(`Network error: ${err}`);
+          // Server not reachable -- schedule auto-retry with backoff
+          scheduleAutoConnect("Network error: " + (err.message || err));
           return;
         }
 
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) {
-          await stopStream(`Offer failed: ${payload.error || response.statusText}`);
+          const msg = payload.error || response.statusText;
+          // Server returned an error -- schedule auto-retry with backoff
+          scheduleAutoConnect("Offer failed: " + msg);
           return;
         }
+
+        // Offer succeeded -- reset retry counter
+        resetAutoConnectAttempt();
 
         await pc.setRemoteDescription(payload);
         applyReceiverTuning();
@@ -886,9 +1413,214 @@
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       }
 
-      startButton.addEventListener("click", startStream);
+      startButton.addEventListener("click", () => {
+        resetAutoConnectAttempt();
+        startStream();
+      });
       stopButton.addEventListener("click", () => stopStream());
-      enterVrButton.addEventListener("click", () => enterVR().catch((e) => stopStream(`XR error: ${e}`)));
+      enterVrButton.addEventListener("click", () => enterVR().catch((e) => stopStream("XR error: " + e)));
+
+      /* ── Settings panel ── */
+
+      const settingsButton = $("settingsButton");
+      const settingsOverlay = $("settingsOverlay");
+      const settingsCloseBtn = $("settingsCloseBtn");
+      const settingsCancelBtn = $("settingsCancelBtn");
+      const settingsApplyBtn = $("settingsApplyBtn");
+      const settingsFeedback = $("settingsFeedback");
+      const settingsCamForms = $("settingsCamForms");
+
+      const AWB_MODES = ["auto", "daylight", "cloudy", "tungsten", "fluorescent", "incandescent", "indoor", "shade"];
+
+      function closeSettings() {
+        settingsOverlay.classList.remove("open");
+        settingsFeedback.className = "";
+        settingsFeedback.style.display = "none";
+        settingsFeedback.textContent = "";
+      }
+
+      function buildCamForm(camName, profile) {
+        const label = camName === "cam0" ? "Left Camera (cam0)" : "Right Camera (cam1)";
+        const crop = profile.crop || [1000, 1000];
+        const gains = profile.colour_gains || [1.0, 1.0];
+
+        return `
+          <div class="settings-cam-section" data-cam="${camName}">
+            <h3>${label}</h3>
+            <div class="settings-row">
+              <div class="settings-label">Bitrate</div>
+              <div class="settings-input">
+                <input type="number" name="bitrate_mbps" min="1" max="100" step="0.5"
+                       value="${profile.bitrate_mbps || 10}" />
+                <span style="color:#666">Mbps</span>
+                <span class="settings-tag runtime">live</span>
+              </div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-label">AWB Mode</div>
+              <div class="settings-input">
+                <select name="awb_mode">
+                  ${AWB_MODES.map(m => '<option value="' + m + '"' + (m === profile.awb_mode ? " selected" : "") + '>' + m + '</option>').join("")}
+                </select>
+                <span class="settings-tag runtime">live</span>
+              </div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-label">Red Gain</div>
+              <div class="settings-input">
+                <input type="range" name="colour_gain_red" min="0" max="8" step="0.05"
+                       value="${gains[0]}" />
+                <span class="range-value" data-for="colour_gain_red">${Number(gains[0]).toFixed(2)}</span>
+                <span class="settings-tag runtime">live</span>
+              </div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-label">Blue Gain</div>
+              <div class="settings-input">
+                <input type="range" name="colour_gain_blue" min="0" max="8" step="0.05"
+                       value="${gains[1]}" />
+                <span class="range-value" data-for="colour_gain_blue">${Number(gains[1]).toFixed(2)}</span>
+                <span class="settings-tag runtime">live</span>
+              </div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-label">Crop W</div>
+              <div class="settings-input">
+                <input type="number" name="crop_w" min="100" max="5000" step="10"
+                       value="${crop[0]}" />
+                <span style="color:#666">px</span>
+                <span class="settings-tag restart">restart</span>
+              </div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-label">Crop H</div>
+              <div class="settings-input">
+                <input type="number" name="crop_h" min="100" max="5000" step="10"
+                       value="${crop[1]}" />
+                <span style="color:#666">px</span>
+                <span class="settings-tag restart">restart</span>
+              </div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-label">Offset X</div>
+              <div class="settings-input">
+                <input type="number" name="offset_x" min="-2000" max="2000" step="1"
+                       value="${profile.offset_x || 0}" />
+                <span style="color:#666">px</span>
+                <span class="settings-tag restart">restart</span>
+              </div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-label">Offset Y</div>
+              <div class="settings-input">
+                <input type="number" name="offset_y" min="-2000" max="2000" step="1"
+                       value="${profile.offset_y || 0}" />
+                <span style="color:#666">px</span>
+                <span class="settings-tag restart">restart</span>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      function attachSliderListeners() {
+        settingsCamForms.querySelectorAll('input[type="range"]').forEach((slider) => {
+          const display = slider.closest(".settings-input").querySelector('.range-value[data-for="' + slider.name + '"]');
+          if (display) {
+            slider.addEventListener("input", () => { display.textContent = Number(slider.value).toFixed(2); });
+          }
+        });
+      }
+
+      async function openSettings() {
+        settingsFeedback.className = "";
+        settingsFeedback.style.display = "none";
+        settingsFeedback.textContent = "";
+        settingsApplyBtn.disabled = true;
+        settingsCamForms.innerHTML = '<div style="color:#666;padding:20px;text-align:center;">Loading settings...</div>';
+        settingsOverlay.classList.add("open");
+
+        try {
+          const resp = await fetch("/api/settings");
+          if (!resp.ok) throw new Error("HTTP " + resp.status);
+          const data = await resp.json();
+          let html = "";
+          for (const cam of ["cam0", "cam1"]) {
+            if (data[cam]) html += buildCamForm(cam, data[cam]);
+          }
+          settingsCamForms.innerHTML = html;
+          attachSliderListeners();
+          settingsApplyBtn.disabled = false;
+        } catch (err) {
+          settingsCamForms.innerHTML = '<div style="color:#ef5350;padding:20px;text-align:center;">Failed to load settings: ' + err.message + '</div>';
+        }
+      }
+
+      function gatherSettings() {
+        const payload = {};
+        settingsCamForms.querySelectorAll(".settings-cam-section").forEach((section) => {
+          const cam = section.dataset.cam;
+          const get = (name) => section.querySelector('[name="' + name + '"]');
+          const numVal = (name) => { const el = get(name); return el ? Number(el.value) : undefined; };
+          const strVal = (name) => { const el = get(name); return el ? el.value : undefined; };
+
+          payload[cam] = {
+            bitrate_mbps: numVal("bitrate_mbps"),
+            awb_mode: strVal("awb_mode"),
+            colour_gains: [numVal("colour_gain_red"), numVal("colour_gain_blue")],
+            crop: [numVal("crop_w"), numVal("crop_h")],
+            offset_x: numVal("offset_x"),
+            offset_y: numVal("offset_y"),
+          };
+        });
+        return payload;
+      }
+
+      async function applySettings() {
+        settingsApplyBtn.disabled = true;
+        settingsFeedback.className = "";
+        settingsFeedback.style.display = "none";
+
+        const payload = gatherSettings();
+        try {
+          const resp = await fetch("/api/settings", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const result = await resp.json().catch(() => ({}));
+          if (!resp.ok) {
+            settingsFeedback.textContent = result.error || "Failed to apply settings.";
+            settingsFeedback.className = "error";
+            settingsFeedback.style.display = "block";
+          } else if (result.restart_needed) {
+            settingsFeedback.textContent = result.message || "Settings saved -- server restart required.";
+            settingsFeedback.className = "warning";
+            settingsFeedback.style.display = "block";
+          } else {
+            settingsFeedback.textContent = result.message || "Settings applied.";
+            settingsFeedback.className = "success";
+            settingsFeedback.style.display = "block";
+          }
+        } catch (err) {
+          settingsFeedback.textContent = "Network error: " + err.message;
+          settingsFeedback.className = "error";
+          settingsFeedback.style.display = "block";
+        } finally {
+          settingsApplyBtn.disabled = false;
+        }
+      }
+
+      settingsButton.addEventListener("click", openSettings);
+      settingsCloseBtn.addEventListener("click", closeSettings);
+      settingsCancelBtn.addEventListener("click", closeSettings);
+      settingsApplyBtn.addEventListener("click", applySettings);
+      settingsOverlay.addEventListener("click", (e) => {
+        if (e.target === settingsOverlay) closeSettings();
+      });
+
+      /* ── Auto-connect on page load ── */
+      startStream();
     </script>
   </body>
 </html>

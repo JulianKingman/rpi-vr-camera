@@ -180,12 +180,17 @@ def main() -> None:
     print(f"  CA private key:     {ca_key}")
     print(f"  Server certificate: {server_crt}")
     print(f"  Server key:         {server_key}")
+    auto_cmd = "make stream-webrtc"
     recommend_cmd = (
         'make stream-webrtc ARGS="--host 0.0.0.0 --port 8443 '
         f'--cert {server_crt} --key {server_key} --ca-cert {ca_crt}"'
     )
-    print("\nInstall the CA certificate on your Quest, then launch:")
+    print("\nInstall the CA certificate on your Quest (Settings → Security → Install certificates → CA),")
+    print("reboot the headset, then launch the streamer (it auto-detects the new certs):")
+    print(f"  {auto_cmd}")
+    print("Need to override the paths manually? Use:")
     print(f"  {recommend_cmd}")
+    print("Download the CA directly from a browser via http://<pi-ip>:8080/ca.crt before installing it on the Quest.")
 
 
 if __name__ == "__main__":

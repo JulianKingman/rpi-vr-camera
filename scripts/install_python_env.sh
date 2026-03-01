@@ -16,11 +16,11 @@ pip install --upgrade pip wheel
 if [[ "$(uname)" == "Darwin" ]]; then
   echo "Detected macOS - installing Mac-compatible packages..."
   # Mac: Skip picamera2 (RPI-only)
-  pip install aiortc aiohttp opencv-python numpy pyyaml PySide6 || true
+  pip install aiortc aiohttp opencv-python numpy pyyaml PySide6 qrcode || true
   echo "Note: picamera2 is RPI-only and skipped on Mac"
 else
   # Linux/RPI: Install all packages including picamera2
-  pip install aiortc aiohttp opencv-python numpy pyyaml PySide6
+  pip install aiortc aiohttp opencv-python numpy pyyaml PySide6 qrcode
   pip install picamera2 || echo "Warning: picamera2 installation failed (expected on non-RPI systems)"
   
   # Link libcamera bindings (RPI only)
