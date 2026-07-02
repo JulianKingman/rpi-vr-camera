@@ -106,9 +106,16 @@ class StereoCapture:
         # On macOS, camera indices are not stable; Continuity Camera can show up as 0 or 1.
         # Default to 0 (override via MAC_CAMERA_INDEX) to avoid hardcoding assumptions.
         camera_index = int(os.getenv("MAC_CAMERA_INDEX", "0"))
+        right_index = int(os.getenv("MAC_CAMERA_INDEX_RIGHT", str(camera_index)))
         mode = os.getenv("CAMERA_MODE", "auto")
         self.left_cam = create_camera(camera_index, left_res, float(framerate), mode=mode)
-        self.right_cam = create_camera(camera_index, right_res, float(framerate), mode=mode)
+        # Opening the same physical camera twice doubles the read work and lets
+        # the two capture queues drift apart; share one device for both eyes.
+        self._shared_camera = right_index == camera_index and mode != "test"
+        if self._shared_camera:
+            self.right_cam = self.left_cam
+        else:
+            self.right_cam = create_camera(right_index, right_res, float(framerate), mode=mode)
 
         self.left_profile = left_profile
         self.right_profile = right_profile
@@ -128,15 +135,17 @@ class StereoCapture:
         try:
             while not self.stop_event.is_set():
                 left_frame = self.left_cam.capture_array()
-                right_frame = self.right_cam.capture_array()
+                right_frame = left_frame if self._shared_camera else self.right_cam.capture_array()
+                # Stamp at read completion (boottime_us domain, same clock the
+                # pong srx/stx sync uses) so processing/encode time downstream
+                # is measured by the E2E metric rather than hidden before it.
+                capture_ts = boottime_us() / 1e6
 
                 left_processed = process_frame(left_frame, self.left_profile, self.left_res)
                 right_processed = process_frame(right_frame, self.right_profile, self.right_res)
 
                 with self.frame_lock:
-                    # boottime_us domain so client clock-offset math (pong srx/stx)
-                    # applies to frame capture timestamps too.
-                    self.latest = StereoFrame(timestamp=boottime_us() / 1e6, left_image=left_processed, right_image=right_processed)
+                    self.latest = StereoFrame(timestamp=capture_ts, left_image=left_processed, right_image=right_processed)
                     self._frame_seq += 1
 
                 # Sleep precisely: account for time already spent capturing/processing
@@ -319,7 +328,6 @@ class WebRTCServer:
 
         video_track_left = StereoVideoTrack(self.capture, self.capture.framerate, "left")
         video_track_right = StereoVideoTrack(self.capture, self.capture.framerate, "right")
-        audio_track = SilenceAudioTrack()
 
         try:
             video_codecs = RTCRtpSender.getCapabilities("video").codecs  # type: ignore[attr-defined]
@@ -383,30 +391,26 @@ class WebRTCServer:
         left_transceiver.sender.replaceTrack(video_track_left)
         right_transceiver.sender.replaceTrack(video_track_right)
 
-        # Set bitrate if configured
+        # Raise aiortc's default/ceiling bitrates to the configured target.
+        # The sender's encoder is created lazily on the first frame (poking
+        # sender._RTCRtpSender__encoder here would hit None), and REMB
+        # congestion control re-sets target_bitrate clamped to MAX_BITRATE —
+        # so the module constants are the effective knobs.
         bitrate_mbps = self.capture.left_profile.get("bitrate_mbps") or self.capture.right_profile.get("bitrate_mbps")
-        if bitrate_mbps:
-            bitrate_bps = int(float(bitrate_mbps) * 1_000_000)
-            for sender in [left_transceiver.sender, right_transceiver.sender]:
-                encoder = getattr(sender, "_RTCRtpSender__encoder", None)
-                if encoder and hasattr(encoder, "target_bitrate"):
-                    try:
-                        encoder.target_bitrate = bitrate_bps
-                    except Exception as exc:  # noqa: BLE001
-                        print(f"[WARN] Failed to set encoder bitrate: {exc}", file=sys.stderr)
+        target_bitrate_bps = int(float(bitrate_mbps) * 1_000_000) if bitrate_mbps else None
+        if target_bitrate_bps:
+            h264_codecs.DEFAULT_BITRATE = max(h264_codecs.DEFAULT_BITRATE, target_bitrate_bps)
+            h264_codecs.MAX_BITRATE = max(h264_codecs.MAX_BITRATE, target_bitrate_bps)
 
-        # Handle audio transceiver
+        # Audio only if the client offered it (current client doesn't — a
+        # synced audio track can engage AV-sync playout delay on the video).
         audio_transceiver = next((t for t in pc.getTransceivers() if t.kind == "audio"), None)
         if audio_transceiver:
             try:
                 audio_transceiver.direction = "sendonly"
             except Exception:  # noqa: BLE001
                 pass
-            audio_transceiver.sender.replaceTrack(audio_track)
-        else:
-            # Client didn't offer audio, add one
-            audio_transceiver = pc.addTransceiver("audio")
-            audio_transceiver.sender.replaceTrack(audio_track)
+            audio_transceiver.sender.replaceTrack(SilenceAudioTrack())
 
         try:
             answer = await pc.createAnswer()
@@ -431,7 +435,28 @@ class WebRTCServer:
                 while pc.connectionState not in {"failed", "closed"}:
                     tick += 1
                     for label, transceiver, track in eye_senders:
-                        stats = await transceiver.sender.getStats()
+                        # Chromium's REMB estimate starts low and aiortc rewrites
+                        # encoder.target_bitrate from every REMB packet, trapping
+                        # the stream at ~1.5Mbps. On this loopback/LAN test rig
+                        # adaptation is pointless, so pin the property: reads
+                        # return the configured target, REMB writes are no-ops.
+                        # (Encoder is created lazily on the first frame, hence
+                        # the per-tick retry until pinned.)
+                        sender = transceiver.sender
+                        if target_bitrate_bps and not getattr(sender, "_bitrate_pinned", False):
+                            encoder = getattr(sender, "_RTCRtpSender__encoder", None)
+                            if encoder is not None and hasattr(type(encoder), "target_bitrate"):
+                                cls = type(encoder)
+                                pinned = type("Pinned" + cls.__name__, (cls,), {
+                                    "target_bitrate": property(
+                                        lambda self, _bps=target_bitrate_bps: _bps,
+                                        lambda self, value: None,
+                                    ),
+                                })
+                                encoder.__class__ = pinned
+                                sender._bitrate_pinned = True
+                                print(f"[INFO] Pinned {label} encoder bitrate to {target_bitrate_bps} bps", flush=True)
+                        stats = await sender.getStats()
                         bytes_sent = 0
                         packets_sent = 0
                         for report in stats.values():

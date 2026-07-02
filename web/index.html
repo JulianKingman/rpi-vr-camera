@@ -1640,7 +1640,8 @@
 
         pc.addTransceiver("video", { direction: "recvonly" });
         pc.addTransceiver("video", { direction: "recvonly" });
-        pc.addTransceiver("audio", { direction: "recvonly" });
+        // No audio transceiver: the server only ever sent silence, and a
+        // synced audio track can engage AV-sync playout delay on the video.
 
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);

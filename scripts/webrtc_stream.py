@@ -1017,7 +1017,7 @@ class WebRTCServer:
                 text=json.dumps({"error": f"Invalid remote description: {exc}"}),
             )
 
-        audio_track = SilenceAudioTrack()
+        audio_track: Optional[SilenceAudioTrack] = None
 
         try:
             video_codecs = RTCRtpSender.getCapabilities("video").codecs  # type: ignore[attr-defined]
@@ -1074,6 +1074,8 @@ class WebRTCServer:
             print(f"[WARN] No remote slot for {label} track; stopping encoder.", flush=True)
             track.stop()
 
+        # Audio only if the client offered it (current client doesn't — a
+        # synced audio track can engage AV-sync playout delay on the video).
         audio_transceiver = next((t for t in pc.getTransceivers() if t.kind == "audio"), None)
         if audio_transceiver:
             try:
@@ -1082,17 +1084,17 @@ class WebRTCServer:
                 pass
             if audio_transceiver.sender:
                 try:
+                    audio_track = SilenceAudioTrack()
                     audio_transceiver.sender.replaceTrack(audio_track)
                 except Exception as exc:  # noqa: BLE001
                     print(f"[WARN] Failed to replace audio track: {exc}", file=sys.stderr)
-        else:
-            pc.addTrack(audio_track)
 
         async def _handle_state_change() -> None:
             if pc.connectionState in {"failed", "closed"}:
                 for _, _, _, track in created_transceivers:
                     track.stop()
-                audio_track.stop()
+                if audio_track is not None:
+                    audio_track.stop()
                 await pc.close()
                 self.pcs.discard(pc)
 

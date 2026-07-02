@@ -88,6 +88,9 @@ class OpenCVCameraAdapter(CameraInterface):
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, resolution[0])
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, resolution[1])
         self.cap.set(cv2.CAP_PROP_FPS, framerate)
+        # Serve the newest frame instead of a queued stale one (backends that
+        # don't support this ignore it)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         # Read actual resolution
         actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
