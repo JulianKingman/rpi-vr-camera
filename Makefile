@@ -19,6 +19,8 @@ TIMEOUT ?= 5000
 KEYPRESS ?= 1
 OUT_ROOT ?= capture-output
 LABEL ?= $(shell date +%Y%m%d_%H%M%S)
+CAMERA_MODE ?=
+TEST_PATTERN ?=
 
 CAPTURE_TIMEOUT := --timeout $(TIMEOUT)
 CAPTURE_KEYPRESS := $(if $(filter 0,$(KEYPRESS)),,--keypress)
@@ -35,7 +37,8 @@ help:
 	@echo "  make calibration-ui   # launch Qt calibration interface"
 	@echo "  make stream-preview   # live side-by-side stereo preview (Picamera2)"
 	@echo "  make stream-cast      # preview + network cast via ffmpeg"
-	@echo "  make stream-webrtc    # launch WebRTC/WebXR server (requires browser client)"
+	@echo "  make stream-webrtc    # launch WebRTC/WebXR server (RPI-only, hardware encoding)"
+	@echo "  make stream-webrtc-mac # launch WebRTC server (Mac/software encoding)"
 	@echo "  make stream-webrtc-gst # launch GStreamer-based WebRTC pipeline (option 3 prototype)"
 	@echo "  make tls-certs        # interactive helper for HTTPS certificates"
 	@echo "  make install-service  # install, enable, and start the systemd service"
@@ -156,7 +159,28 @@ stream-webrtc:
 		echo "Virtualenv missing. Run 'make python-deps' first."; \
 		exit 1; \
 	fi
-	. .venv/bin/activate && python scripts/webrtc_stream.py $(ARGS)
+	@env_args=""; \
+	if [ -n "$(CAMERA_MODE)" ]; then \
+		env_args="$$env_args CAMERA_MODE=$(CAMERA_MODE)"; \
+	fi; \
+	if [ -n "$(TEST_PATTERN)" ]; then \
+		env_args="$$env_args TEST_PATTERN=$(TEST_PATTERN)"; \
+	fi; \
+	. .venv/bin/activate && env $$env_args python scripts/webrtc_stream.py $(ARGS)
+
+stream-webrtc-mac:
+	@if [ ! -x .venv/bin/python3 ]; then \
+		echo "Virtualenv missing. Run 'make python-deps' first."; \
+		exit 1; \
+	fi
+	@env_args=""; \
+	if [ -n "$(CAMERA_MODE)" ]; then \
+		env_args="$$env_args CAMERA_MODE=$(CAMERA_MODE)"; \
+	fi; \
+	if [ -n "$(TEST_PATTERN)" ]; then \
+		env_args="$$env_args TEST_PATTERN=$(TEST_PATTERN)"; \
+	fi; \
+	. .venv/bin/activate && env $$env_args python scripts/webrtc_stream_mac.py $(ARGS)
 
 DEFAULT_GST_HOST ?= 0.0.0.0
 DEFAULT_GST_PORT ?= 8443

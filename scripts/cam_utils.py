@@ -44,10 +44,11 @@ _AWB_MODE_CANDIDATES = [
 ]
 
 AWB_MODE_MAP: Dict[str, int] = {}
-for key, enum_name in _AWB_MODE_CANDIDATES:
-    value = getattr(controls.AwbModeEnum, enum_name, None)
-    if value is not None:
-        AWB_MODE_MAP[key] = value
+if controls is not None:
+    for key, enum_name in _AWB_MODE_CANDIDATES:
+        value = getattr(controls.AwbModeEnum, enum_name, None)
+        if value is not None:
+            AWB_MODE_MAP[key] = value
 
 
 @dataclass

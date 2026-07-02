@@ -48,6 +48,15 @@ python scripts/webrtc_stream.py --framerate 56
 
 Both "cameras" will use the same test pattern (you can modify `camera_adapter.py` to generate different patterns per index).
 
+## Important Note
+
+**`webrtc_stream.py` is RPI-only** - it uses hardware H.264 encoding and requires picamera2. For Mac testing, you'll need a different approach or modify the script to use software encoding.
+
+**For Mac latency testing**, consider:
+1. Using `stream_stereo.py` with OpenCV (capture frames, no WebRTC)
+2. Creating a software-encoded WebRTC version
+3. Testing the WebRTC pipeline separately with synthetic data
+
 ## Quick Start
 
 1. **Install dependencies** (OpenCV is the main requirement):
@@ -55,17 +64,17 @@ Both "cameras" will use the same test pattern (you can modify `camera_adapter.py
 pip install opencv-python numpy aiortc aiohttp pyyaml
 ```
 
-2. **Test with Mac camera**:
+2. **Test frame capture** (no WebRTC):
 ```bash
 export CAMERA_MODE=opencv
-python scripts/webrtc_stream.py --host 0.0.0.0 --port 8443
+python scripts/stream_stereo.py  # Uses camera adapter
 ```
 
 3. **Test with patterns** (no camera needed):
 ```bash
 export CAMERA_MODE=test
 export TEST_PATTERN=timestamp
-python scripts/webrtc_stream.py --framerate 90
+python scripts/test_mac_camera.py
 ```
 
 4. **Open in browser**: Navigate to `http://localhost:8443` (or `https://` if using TLS)

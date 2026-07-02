@@ -1108,7 +1108,12 @@ def main() -> None:
         bitrate_mbps=args.bitrate_mbps,
     )
 
-    loop.run_until_complete(pipeline.start())
+    try:
+        loop.run_until_complete(pipeline.start())
+    except Exception as exc:  # noqa: BLE001
+        logging.error("Failed to start GStreamer pipeline: %s", exc)
+        loop.close()
+        sys.exit(1)
 
     ca_cert_path = args.ca_cert.expanduser() if args.ca_cert else None
     if ca_cert_path and not ca_cert_path.exists():
@@ -1140,7 +1145,28 @@ def main() -> None:
     runner = web.AppRunner(app)
     loop.run_until_complete(runner.setup())
     site = web.TCPSite(runner, host=args.host, port=args.port, ssl_context=ssl_context)
-    loop.run_until_complete(site.start())
+    try:
+        loop.run_until_complete(site.start())
+    except OSError as exc:
+        logging.error(
+            "Failed to start server on %s:%s: %s",
+            args.host,
+            args.port,
+            exc,
+        )
+        if exc.errno == 48:  # Address already in use
+            logging.error(
+                "Port %s is already in use. Try a different port or stop the process using it.",
+                args.port,
+            )
+        elif exc.errno == 13:  # Permission denied
+            logging.error(
+                "Permission denied binding to port %s. Try a port >= 1024 or run with appropriate privileges.",
+                args.port,
+            )
+        loop.run_until_complete(runner.cleanup())
+        loop.close()
+        sys.exit(1)
 
     logging.info("GStreamer Option 3 pipeline running on %s:%s", args.host, args.port)
     try:

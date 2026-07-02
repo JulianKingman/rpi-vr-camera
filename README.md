@@ -101,7 +101,7 @@ OUT_ROOT=test-output make capture-left  # store captures under test-output/...
 - Add `PREVIEW=drm` to the preview target when running on a Wayland desktop to see the live feed.
 - Run `make stream-preview` for a live side-by-side window honouring the current calibration; use `--headless` if no GUI is available.
 - Run `make stream-cast ARGS="--endpoint udp://host:port"` to preview locally while ffmpeg multicasts the combined feed.
-- Run `make stream-webrtc ARGS="--host 0.0.0.0 --port 8443"` and open `https://<pi-ip>:8443/` in a WebRTC-capable browser (Quest, desktop) to view the stream. The page now negotiates independent left/right hardware-encoded tracks; use **Enter VR** to bind each eye to its dedicated stream.
+- Run `make stream-webrtc ARGS="--host 0.0.0.0 --port 8443"` and open `https://<pi-ip>:8443/` in a WebRTC-capable browser (Quest, desktop) to view the stream. The page now negotiates independent left/right hardware-encoded tracks; use **Enter VR** to bind each eye to its dedicated stream. **Note**: This script requires RPI hardware encoding (picamera2) and won't work on Mac for latency testing - use test patterns or modify for software encoding.
 - Pass `--resolution WIDTHxHEIGHT` (for example, `--resolution 4056x3040`) inside `ARGS` to exercise other sensor modes without editing the config file. The override applies to both cameras for the current run.
 - Run `make calibration-ui` for a live Qt preview where you can tweak rotation, flips, crops, and offsets (writes back to `config/camera_profiles.yaml`).
 - Captures land under `capture-output/<left|right>/<YYYYMMDD_HHMMSS>` with raw `.h264`, matching `.mp4`, and `.pts`; override the base folder via `OUT_ROOT=...`.

@@ -91,10 +91,16 @@ class OpenCVCameraAdapter(CameraInterface):
         # Read actual resolution
         actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = float(self.cap.get(cv2.CAP_PROP_FPS) or 0.0)
         self._resolution = (actual_width, actual_height)
         self._target_resolution = resolution
         self._framerate = framerate
-        print(f"[INFO] Camera {camera_num}: {actual_width}x{actual_height} @ {framerate} fps")
+        reported = f"{actual_fps:.2f}" if actual_fps > 0 else "unknown"
+        print(
+            f"[INFO] Camera {camera_num}: {actual_width}x{actual_height} "
+            f"target_fps={framerate} reported_fps={reported}",
+            flush=True,
+        )
 
     def capture_array(self) -> np.ndarray:
         ret, frame = self.cap.read()
@@ -282,5 +288,17 @@ def list_available_cameras(mode: Optional[str] = None) -> list[int]:
         return [0, 1]
 
     return []
+
+
+
+
+
+
+
+
+
+
+
+
 
 
