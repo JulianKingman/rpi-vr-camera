@@ -1,5 +1,15 @@
 # Low-Latency Stereo Streaming – Option 2 vs Option 3
 
+> **Correction (July 2026):** the Raspberry Pi 5 (BCM2712) has **no H.264 hardware
+> encoder** — `picamera2.encoders.H264Encoder` silently falls back to software x264
+> (`LibavH264Encoder`) on Pi 5 (picamera2 issue #1135). Everywhere this document says
+> "hardware encode" for Option 2, read "zero-copy software x264 encode inside
+> Picamera2". The dual-track/no-re-encode architecture and its CPU savings vs the
+> original `capture_array()` path remain valid, but encoder tuning is x264 tuning
+> (VBV, intra-refresh, preset), and Option 2's headroom is bounded by CPU. Option 3's
+> `v4l2h264enc` element is likewise unavailable on Pi 5; its GStreamer pipeline would
+> also use a software encoder.
+
 ## 1. Background & Goals
 - Current `scripts/webrtc_stream.py` path uses Picamera2 `capture_array()` per camera, processes frames in Python/OpenCV, and relies on aiortc’s software H.264 encoder.
 - Observed issues: high glass-to-glass latency (>60 ms), choppy perceived framerate despite nominal 56 fps capture, and poor bitrate/quality under load.

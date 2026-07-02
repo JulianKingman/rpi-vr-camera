@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Blink — glass-to-glass latency target</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+    #panel { position: absolute; inset: 0; background: #000; }
+    #panel.white { background: #fff; }
+    #counter {
+      position: absolute; bottom: 4vh; right: 4vw;
+      font: bold 12vh monospace; color: #888; mix-blend-mode: difference;
+    }
+    #help {
+      position: absolute; top: 2vh; left: 2vw; color: #666;
+      font: 14px sans-serif; max-width: 40em;
+    }
+  </style>
+</head>
+<body>
+  <div id="panel"></div>
+  <div id="counter">0</div>
+  <div id="help">
+    Physical latency target: point the Pi camera at this screen, film this
+    screen and the Quest lens together at 240fps slo-mo, and count phone frames
+    between flips (each phone frame = 4.17ms). Flips every 500ms. Click to hide
+    this text.
+  </div>
+  <script>
+    const panel = document.getElementById("panel");
+    const counter = document.getElementById("counter");
+    const help = document.getElementById("help");
+    help.addEventListener("click", () => (help.style.display = "none"));
+
+    const PERIOD_MS = 500;
+    let flips = 0;
+    let nextFlip = performance.now() + PERIOD_MS;
+
+    function tick(now) {
+      // rAF-driven so the flip lands on a real display frame, not a timer tick.
+      if (now >= nextFlip) {
+        flips++;
+        panel.classList.toggle("white");
+        counter.textContent = String(flips);
+        nextFlip += PERIOD_MS;
+        if (now >= nextFlip) nextFlip = now + PERIOD_MS; // tab was backgrounded
+      }
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  </script>
+</body>
+</html>

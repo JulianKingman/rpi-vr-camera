@@ -593,10 +593,11 @@
         </label>
         <label title="Jitter buffer target in ms. Lower = less latency, more risk of stutter.">
           JB
-          <input id="jbTargetMs" type="number" min="0" step="5" value="10" style="width:52px" />
+          <input id="jbTargetMs" type="number" min="0" step="5" value="0" style="width:52px" />
           <span style="color:#666">ms</span>
         </label>
         <button class="hud-btn" id="copyHudButton" type="button">Copy</button>
+        <button class="hud-btn" id="recordButton" type="button" title="Record 60s of metrics and save a report on the server">Rec 60s</button>
       </div>
       <div class="hud-panel" id="statsPanel">
         <!-- Populated by JS -->
@@ -649,8 +650,11 @@
       let latencyDc = null;
       let userInitiatedStop = false;
 
+      // jitterBufferTarget is spec'd in MILLISECONDS (0-4000); playoutDelayHint
+      // is in seconds. Both default to null in Chromium, so feature-detect with
+      // `in`, never `typeof === "number"`.
       const receiverTuning = {
-        jitterBufferTargetS: 0.01,
+        jitterBufferTargetMs: 0,
         playoutDelayHintS: 0.0,
       };
 
@@ -744,18 +748,21 @@
       }
 
       function parseJbTargetMs() {
-        const v = jbTargetMsEl ? Number(jbTargetMsEl.value) : 10;
-        if (!Number.isFinite(v) || v < 0) return 10;
+        const v = jbTargetMsEl ? Number(jbTargetMsEl.value) : 0;
+        if (!Number.isFinite(v) || v < 0) return 0;
         return v;
+      }
+
+      function tuneReceiver(r) {
+        if (!r) return;
+        try { if ("playoutDelayHint" in r) r.playoutDelayHint = receiverTuning.playoutDelayHintS; } catch {}
+        try { if ("jitterBufferTarget" in r) r.jitterBufferTarget = receiverTuning.jitterBufferTargetMs; } catch {}
       }
 
       function applyReceiverTuning() {
         if (!pc) return;
-        receiverTuning.jitterBufferTargetS = parseJbTargetMs() / 1000;
-        pc.getReceivers().forEach((r) => {
-          try { if (typeof r.playoutDelayHint === "number") r.playoutDelayHint = receiverTuning.playoutDelayHintS; } catch {}
-          try { if (typeof r.jitterBufferTarget === "number") r.jitterBufferTarget = receiverTuning.jitterBufferTargetS; } catch {}
-        });
+        receiverTuning.jitterBufferTargetMs = parseJbTargetMs();
+        pc.getReceivers().forEach(tuneReceiver);
       }
 
       if (jbTargetMsEl) jbTargetMsEl.addEventListener("change", () => applyReceiverTuning());
@@ -873,15 +880,287 @@
         seq: 0,
         pending: new Map(),
         timer: null,
+        // Clock sync: NTP-style samples from pong srx/stx. offsetUs is
+        // (server_us - client_ms*1000), taken as the median of the 5
+        // lowest-RTT samples in a sliding window of 30.
+        offsetSamples: [],
+        offsetUs: null,
+        offsetQualityMs: null,
       };
 
+      // Sent once by the server when the datachannel opens; drives absolute
+      // HUD thresholds instead of inferred/relative ones.
+      let streamConfig = null;
+
       const serverStats = { byMid: {}, prevByMid: {} };
+
+      function percentile(sorted, p) {
+        if (!sorted.length) return null;
+        const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1));
+        return sorted[idx];
+      }
+
+      function updateClockOffset(t0Ms, srxUs, stxUs, t3Ms) {
+        const rttMs = (t3Ms - t0Ms) - (stxUs - srxUs) / 1000;
+        if (!Number.isFinite(rttMs) || rttMs < 0) return rttMs;
+        const offsetUs = ((srxUs - t0Ms * 1000) + (stxUs - t3Ms * 1000)) / 2;
+        latencyState.offsetSamples.push({ offsetUs, rttMs });
+        if (latencyState.offsetSamples.length > 30) latencyState.offsetSamples.shift();
+        const best = [...latencyState.offsetSamples].sort((a, b) => a.rttMs - b.rttMs).slice(0, 5);
+        const offsets = best.map((s) => s.offsetUs).sort((a, b) => a - b);
+        latencyState.offsetUs = offsets[Math.floor(offsets.length / 2)];
+        latencyState.offsetQualityMs = (offsets[offsets.length - 1] - offsets[0]) / 2000;
+        return rttMs;
+      }
+
+      /* ── End-to-end (capture -> render) latency via rVFC ── */
+
+      const E2E_ORIGIN_MIN_VOTES = 40;
+      const E2E_MAX_MISSES = 30;
+      const E2E_MAP_LIMIT = 600;
+
+      function makeEyeE2E(eye) {
+        return {
+          eye,
+          map: new Map(),          // pts90k -> { capUs, encUs }
+          originVotes: new Map(),  // candidate origin -> votes
+          origin: null,
+          framesVoted: 0,
+          misses: 0,
+          samples: [],             // { t, ms, piMs, netMs, bufMs }
+          rvfcSupported: "requestVideoFrameCallback" in HTMLVideoElement.prototype,
+          rtpSeen: false,
+        };
+      }
+
+      let e2eState = { left: makeEyeE2E("left"), right: makeEyeE2E("right") };
+
+      function resetE2EState() {
+        e2eState = { left: makeEyeE2E("left"), right: makeEyeE2E("right") };
+      }
+
+      function ingestFrameTs(eye, entries) {
+        const st = e2eState[eye];
+        if (!st) return;
+        for (const [pts90k, capUs, encUs] of entries) {
+          st.map.set(pts90k >>> 0, { capUs, encUs });
+        }
+        while (st.map.size > E2E_MAP_LIMIT) {
+          st.map.delete(st.map.keys().next().value);
+        }
+      }
+
+      function resetOrigin(st) {
+        st.origin = null;
+        st.originVotes.clear();
+        st.framesVoted = 0;
+        st.misses = 0;
+      }
+
+      function voteOrigin(st, rtp, receiveTimeMs) {
+        // The true (rtpTimestamp - pts90k) pairing yields the same candidate
+        // origin on every frame (within +/-1 tick of sender-side rounding);
+        // wrong pairings scatter because real capture intervals jitter by many
+        // 90kHz ticks. Vote among map entries captured within +/-150ms of this
+        // frame's arrival, and lock when one small cluster of candidates
+        // dominates all rivals.
+        const offsetUs = latencyState.offsetUs;
+        if (offsetUs == null) return;
+        let voted = false;
+        for (const [pts90k, entry] of st.map) {
+          const capClientMs = (entry.capUs - offsetUs) / 1000;
+          if (Math.abs(capClientMs - receiveTimeMs) > 150) continue;
+          const candidate = (rtp - pts90k) >>> 0;
+          st.originVotes.set(candidate, (st.originVotes.get(candidate) || 0) + 1);
+          voted = true;
+        }
+        if (voted) st.framesVoted++;
+        if (st.originVotes.size > 4000) {
+          for (const [candidate, votes] of st.originVotes) {
+            if (votes < 3) st.originVotes.delete(candidate);
+          }
+        }
+        let bestOrigin = null;
+        let bestVotes = 0;
+        for (const [candidate, votes] of st.originVotes) {
+          if (votes > bestVotes) { bestVotes = votes; bestOrigin = candidate; }
+        }
+        if (bestOrigin == null) return;
+        // Cluster +/-2 ticks around the leader (sender rounding splits the true
+        // origin across adjacent values); rivals are everything else.
+        let clusterVotes = 0;
+        let bestRival = 0;
+        for (const [candidate, votes] of st.originVotes) {
+          const d = Math.abs(((candidate - bestOrigin + 2147483648) % 4294967296) - 2147483648);
+          if (d <= 2) clusterVotes += votes;
+          else if (votes > bestRival) bestRival = votes;
+        }
+        if (clusterVotes >= E2E_ORIGIN_MIN_VOTES && clusterVotes >= 4 * Math.max(bestRival, 1)) {
+          st.origin = bestOrigin;
+          st.misses = 0;
+        }
+      }
+
+      function handleVideoFrame(st, meta) {
+        const rtp = meta.rtpTimestamp;
+        if (typeof rtp !== "number") return;
+        st.rtpSeen = true;
+
+        if (st.origin == null) {
+          voteOrigin(st, rtp, meta.receiveTime ?? performance.now());
+          if (st.origin == null) return;
+        }
+
+        const pts90k = (rtp - st.origin + 4294967296) % 4294967296;
+        // Tick-tolerant lookup: sender-side rounding can shift the wire
+        // timestamp by a tick relative to our recorded pts90k.
+        let entry = null;
+        for (const d of [0, 1, -1, 2, -2]) {
+          entry = st.map.get((pts90k + d + 4294967296) % 4294967296);
+          if (entry) break;
+        }
+        if (!entry) {
+          st.misses++;
+          if (st.misses > E2E_MAX_MISSES) resetOrigin(st); // SSRC/renegotiation: re-vote
+          return;
+        }
+        st.misses = 0;
+
+        const offsetUs = latencyState.offsetUs;
+        if (offsetUs == null) return;
+        const capClientMs = (entry.capUs - offsetUs) / 1000;
+        const encClientMs = (entry.encUs - offsetUs) / 1000;
+        const presentMs = meta.presentationTime;
+        const receiveMs = meta.receiveTime;
+        const sample = {
+          t: performance.now(),
+          ms: presentMs - capClientMs,
+          piMs: (entry.encUs - entry.capUs) / 1000,
+          netMs: receiveMs != null ? receiveMs - encClientMs : null,
+          bufMs: receiveMs != null ? presentMs - receiveMs : null,
+        };
+        if (!Number.isFinite(sample.ms) || sample.ms < -50 || sample.ms > 5000) return;
+        st.samples.push(sample);
+        const cutoff = sample.t - 2500;
+        while (st.samples.length && st.samples[0].t < cutoff) st.samples.shift();
+        if (recorderState.active) recorderState.e2e[st.eye].push(Math.round(sample.ms * 100) / 100);
+      }
+
+      function attachE2E(video, eye) {
+        const st = e2eState[eye];
+        if (!st.rvfcSupported || video._e2eAttached) return;
+        video._e2eAttached = true;
+        const cb = (_now, meta) => {
+          const cur = e2eState[eye];
+          if (cur) handleVideoFrame(cur, meta);
+          video.requestVideoFrameCallback(cb);
+        };
+        video.requestVideoFrameCallback(cb);
+      }
+
+      /* ── Metrics recorder (60s -> POST /report) ── */
+
+      const recordButton = $("recordButton");
+      const recorderState = {
+        active: false,
+        startT: null,
+        durationMs: 60000,
+        ticks: [],
+        e2e: { left: [], right: [] },
+      };
+
+      function summarize(values) {
+        const clean = values.filter((v) => Number.isFinite(v));
+        if (!clean.length) return null;
+        const sorted = [...clean].sort((a, b) => a - b);
+        const mean = clean.reduce((a, b) => a + b, 0) / clean.length;
+        return {
+          n: clean.length,
+          mean: Math.round(mean * 100) / 100,
+          p50: percentile(sorted, 0.5),
+          p95: percentile(sorted, 0.95),
+          min: sorted[0],
+          max: sorted[sorted.length - 1],
+        };
+      }
+
+      function startRecording() {
+        if (recorderState.active) return;
+        recorderState.active = true;
+        recorderState.startT = performance.now();
+        recorderState.ticks = [];
+        recorderState.e2e = { left: [], right: [] };
+        if (recordButton) { recordButton.disabled = true; recordButton.textContent = "Rec..."; }
+        log("Recording metrics for 60s...");
+        setTimeout(finishRecording, recorderState.durationMs);
+      }
+
+      async function finishRecording() {
+        recorderState.active = false;
+        if (recordButton) { recordButton.disabled = false; recordButton.textContent = "Rec 60s"; }
+
+        const series = {};
+        for (const tick of recorderState.ticks) {
+          for (const [key, value] of Object.entries(tick)) {
+            if (key === "t" || typeof value !== "number") continue;
+            (series[key] = series[key] || []).push(value);
+          }
+        }
+        const summary = {};
+        for (const [key, values] of Object.entries(series)) {
+          const s = summarize(values);
+          if (s) summary[key] = s;
+        }
+        for (const eye of ["left", "right"]) {
+          const s = summarize(recorderState.e2e[eye]);
+          if (s) summary["e2eMs_" + eye] = s;
+        }
+
+        const report = {
+          meta: {
+            date: new Date().toISOString(),
+            userAgent: navigator.userAgent,
+            config: streamConfig,
+            jbTargetMs: parseJbTargetMs(),
+            clockOffsetQualityMs: latencyState.offsetQualityMs,
+            durationS: recorderState.durationMs / 1000,
+            tickCount: recorderState.ticks.length,
+          },
+          summary,
+          ticks: recorderState.ticks,
+          e2e: recorderState.e2e,
+        };
+
+        try {
+          const resp = await fetch("/report", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(report),
+          });
+          const body = await resp.json().catch(() => ({}));
+          if (resp.ok) {
+            log("Report saved: " + (body.saved || "ok"));
+          } else {
+            log("Report save failed (" + resp.status + ")");
+            console.warn("report payload", report);
+          }
+        } catch (err) {
+          log("Report save failed: " + (err.message || err));
+          console.warn("report payload", report);
+        }
+      }
+
+      if (recordButton) recordButton.addEventListener("click", startRecording);
 
       /* ── Stats monitor ── */
 
       let statsTimer = null;
       function monitorConnection(connection) {
         if (statsTimer) clearInterval(statsTimer);
+        // Reset cached state so a reconnect doesn't produce garbage first-tick deltas.
+        monitorConnection._prev = null;
+        monitorConnection._peakBr = null;
+        monitorConnection._hist = [];
 
         statsTimer = setInterval(async () => {
           if (!connection) return;
@@ -919,51 +1198,65 @@
             if (!mids.length) return;
 
             let html = "";
+            const tick = { t: Math.round(now) };
+            const configForMid = (mid, i) => {
+              if (!streamConfig || !streamConfig.eyes) return null;
+              return eyeLabel(mid, i) === "L" ? streamConfig.eyes.left : streamConfig.eyes.right;
+            };
 
-            // ── Bitrate row ── (adaptive thresholds based on peak observed)
+            // Rolling ~1s history: at 250ms polling a single-tick delta is +/-4fps
+            // of pure quantization noise, so rates are computed over 4 ticks.
+            const hist = monitorConnection._hist;
+            hist.push({ t: now, framesByMid: { ...framesByMid }, bytesByMid: { ...bytesByMid } });
+            while (hist.length > 5) hist.shift();
+            const histBase = hist[0];
+            const histElapsed = (now - histBase.t) / 1000;
+
+            // ── Bitrate row ── (absolute thresholds from server config when available)
             const brParts = [];
-            const brValues = [];
-            mids.forEach((mid) => {
-              if (bytesByMid[mid] != null && prev.bytesByMid[mid] != null && elapsed > 0) {
-                brValues.push(((bytesByMid[mid] - prev.bytesByMid[mid]) * 8) / elapsed / 1_000_000);
-              }
-            });
-            // Track peak bitrate to set adaptive thresholds
-            if (!monitorConnection._peakBr) monitorConnection._peakBr = 5;
-            const curPeak = Math.max(...brValues, 0);
-            monitorConnection._peakBr = monitorConnection._peakBr * 0.95 + curPeak * 0.05;
-            const peakBr = Math.max(monitorConnection._peakBr, 2);
-            // Green = within 20% of peak, yellow = within 50%, red = below
-            const brGreen = [peakBr * 0.8, peakBr * 1.5];
-            const brYellow = [peakBr * 0.5, peakBr * 0.8];
             mids.forEach((mid, i) => {
-              if (bytesByMid[mid] != null && prev.bytesByMid[mid] != null && elapsed > 0) {
-                const mbps = ((bytesByMid[mid] - prev.bytesByMid[mid]) * 8) / elapsed / 1_000_000;
-                const cls = hc(mbps, brGreen, brYellow);
+              if (bytesByMid[mid] != null && histBase.bytesByMid[mid] != null && histElapsed > 0) {
+                const mbps = ((bytesByMid[mid] - histBase.bytesByMid[mid]) * 8) / histElapsed / 1_000_000;
+                const cfg = configForMid(mid, i);
+                let cls;
+                if (cfg && typeof cfg.bitrateMbps === "number") {
+                  cls = hc(mbps, [cfg.bitrateMbps * 0.7, cfg.bitrateMbps * 1.3], [cfg.bitrateMbps * 0.4, cfg.bitrateMbps * 1.5]);
+                } else {
+                  // Fallback (no config yet): relative to observed peak
+                  if (!monitorConnection._peakBr) monitorConnection._peakBr = 5;
+                  monitorConnection._peakBr = Math.max(monitorConnection._peakBr * 0.95 + mbps * 0.05, 2);
+                  const peakBr = monitorConnection._peakBr;
+                  cls = hc(mbps, [peakBr * 0.8, peakBr * 1.5], [peakBr * 0.5, peakBr * 0.8]);
+                }
+                tick["mbps_" + eyeLabel(mid, i)] = Math.round(mbps * 100) / 100;
                 brParts.push(`<span class="eye">${eyeLabel(mid, i)}</span><span class="${cls}">${mbps.toFixed(1)}</span>`);
               }
             });
             if (brParts.length) {
               let brHtml = brParts.join('<span class="sep">/</span>');
               brHtml += " Mbps";
+              if (streamConfig?.eyes?.left?.bitrateMbps != null) brHtml += ' <span class="h-dim">cfg ' + streamConfig.eyes.left.bitrateMbps + '</span>';
               if (availBwMbps != null) brHtml += '  <span class="h-dim">bw ' + availBwMbps.toFixed(0) + '</span>';
               html += statRow("Bitrate", brHtml);
             }
 
-            // ── FPS row ── (auto-detect target from observed average)
+            // ── FPS row ── (target from server config; inference only as fallback)
             const fpsParts = [];
             const fpsValues = [];
             mids.forEach((mid) => {
               const framesNow = framesByMid[mid] || 0;
-              const framesPrev = prev.framesByMid[mid] || 0;
-              if (elapsed > 0) fpsValues.push((framesNow - framesPrev) / elapsed);
+              const framesPrev = histBase.framesByMid[mid] || 0;
+              if (histElapsed > 0) fpsValues.push((framesNow - framesPrev) / histElapsed);
             });
-            const fpsTarget = fpsValues.length ? Math.round(Math.max(...fpsValues) / 5) * 5 || 30 : 30;
+            const fpsTarget = (streamConfig && typeof streamConfig.targetFps === "number" && streamConfig.targetFps > 0)
+              ? streamConfig.targetFps
+              : (fpsValues.length ? Math.round(Math.max(...fpsValues) / 5) * 5 || 30 : 30);
             mids.forEach((mid, i) => {
               const framesNow = framesByMid[mid] || 0;
-              const framesPrev = prev.framesByMid[mid] || 0;
-              const fps = elapsed > 0 ? (framesNow - framesPrev) / elapsed : 0;
-              const cls = hc(Math.abs(fps - fpsTarget), [0, fpsTarget * 0.05], [0, fpsTarget * 0.15]);
+              const framesPrev = histBase.framesByMid[mid] || 0;
+              const fps = histElapsed > 0 ? (framesNow - framesPrev) / histElapsed : 0;
+              const cls = fps >= fpsTarget * 0.97 ? "h-green" : (fps >= fpsTarget * 0.9 ? "h-yellow" : "h-red");
+              tick["fps_" + eyeLabel(mid, i)] = Math.round(fps * 10) / 10;
               fpsParts.push(`<span class="eye">${eyeLabel(mid, i)}</span><span class="${cls}">${fps.toFixed(1)}</span>`);
             });
             if (fpsParts.length) {
@@ -988,6 +1281,7 @@
             if (rtt != null) {
               const src = latencyState.ewmaRttMs != null ? "dc" : "ice";
               const cls = hc(rtt, [0, 10], [10, 30]);
+              tick.rttMs = Math.round(rtt * 100) / 100;
               latParts.push(`<span class="h-dim">rtt</span> <span class="${cls}">${rtt.toFixed(0)}ms</span> <span class="h-dim">${src}</span>`);
             }
             // Per-eye JB
@@ -1006,6 +1300,7 @@
             if (jbVals.length) {
               const jbHtml = jbVals.map(v => {
                 const cls = hc(v.ms, [0, 20], [20, 60]);
+                tick["jbMs_" + v.eye] = Math.round(v.ms * 100) / 100;
                 return `<span class="eye">${v.eye}</span><span class="${cls}">${v.ms.toFixed(0)}ms</span>`;
               }).join('<span class="sep">/</span>');
               latParts.push('<span class="h-dim">jb</span> ' + jbHtml);
@@ -1025,10 +1320,44 @@
             });
             if (decVals.length) {
               const avgDec = decVals.reduce((a, b) => a + b, 0) / decVals.length;
+              tick.decMs = Math.round(avgDec * 100) / 100;
               latParts.push('<span class="h-dim">dec</span> ' + avgDec.toFixed(1) + 'ms');
             }
             if (latParts.length) {
               html += statRow("Latency", latParts.join('<span class="sep">&middot;</span>'));
+            }
+
+            // ── E2E row ── (capture -> render, from rVFC + frame_ts + clock sync)
+            const e2eParts = [];
+            for (const eye of ["left", "right"]) {
+              const st = e2eState[eye];
+              const label = eye === "left" ? "L" : "R";
+              if (!st.rvfcSupported) { e2eParts.push(`<span class="eye">${label}</span><span class="h-dim">n/a</span>`); continue; }
+              if (!st.rtpSeen || st.origin == null) {
+                if (st.map.size) e2eParts.push(`<span class="eye">${label}</span><span class="h-dim">${st.rtpSeen ? "locking..." : "..."}</span>`);
+                continue;
+              }
+              const fresh = st.samples.filter((s) => now - s.t < 2000);
+              if (!fresh.length) { e2eParts.push(`<span class="eye">${label}</span><span class="h-red">stale</span>`); continue; }
+              const sorted = fresh.map((s) => s.ms).sort((a, b) => a - b);
+              const p50 = percentile(sorted, 0.5);
+              const p95 = percentile(sorted, 0.95);
+              const cls = p50 <= 25 ? "h-green" : (p50 <= 35 ? "h-yellow" : "h-red");
+              tick["e2eP50Ms_" + label] = Math.round(p50 * 10) / 10;
+              tick["e2eP95Ms_" + label] = Math.round(p95 * 10) / 10;
+              const last = fresh[fresh.length - 1];
+              const brk = (last.netMs != null && last.bufMs != null)
+                ? ` <span class="h-dim">pi ${last.piMs.toFixed(0)} net ${last.netMs.toFixed(0)} buf ${last.bufMs.toFixed(0)}</span>`
+                : "";
+              e2eParts.push(`<span class="eye">${label}</span><span class="${cls}">${p50.toFixed(0)}</span><span class="h-dim">/${p95.toFixed(0)}ms</span>${brk}`);
+            }
+            if (e2eParts.length) {
+              let e2eHtml = e2eParts.join('<span class="sep">/</span>');
+              if (latencyState.offsetQualityMs != null) {
+                const q = latencyState.offsetQualityMs;
+                e2eHtml += ` <span class="h-dim">sync&plusmn;${q < 10 ? q.toFixed(1) : q.toFixed(0)}ms</span>`;
+              }
+              html += statRow("E2E", e2eHtml);
             }
 
             // ── Network row ── (aggregate jitter + per-eye loss)
@@ -1059,13 +1388,17 @@
             const netParts = [];
             if (jitVals.length) {
               const maxJit = Math.max(...jitVals);
+              tick.jitterMs = Math.round(maxJit * 100) / 100;
               netParts.push('<span class="h-dim">jit</span> ' + maxJit.toFixed(0) + 'ms');
             }
             if (lossVals.length) {
               const maxLoss = Math.max(...lossVals.map(v => v.pct));
               const cls = hc(maxLoss, [0, 0.1], [0.1, 1]);
+              tick.lossPct = Math.round(maxLoss * 1000) / 1000;
               netParts.push(`<span class="${cls}">loss ${maxLoss.toFixed(2)}%</span>`);
             }
+            tick.nackPerS = elapsed > 0 ? Math.round((totalNack / elapsed) * 10) / 10 : 0;
+            tick.pliPerS = elapsed > 0 ? Math.round((totalPli / elapsed) * 10) / 10 : 0;
             if (totalNack > 0) netParts.push('<span class="h-dim">nack</span> ' + (totalNack / elapsed).toFixed(1) + '/s');
             if (totalPli > 0) netParts.push('<span class="h-dim">pli</span> ' + (totalPli / elapsed).toFixed(1) + '/s');
             if (netParts.length) {
@@ -1077,6 +1410,7 @@
             mids.forEach((mid, i) => {
               if (droppedByMid[mid] != null && prev.droppedByMid[mid] != null) {
                 const d = droppedByMid[mid] - prev.droppedByMid[mid];
+                tick["drops_" + eyeLabel(mid, i)] = d;
                 if (d > 0) {
                   const cls = hc(d, [0, 0], [1, 3]);
                   dropParts.push(`<span class="eye">${eyeLabel(mid, i)}</span><span class="${cls}">${d}</span>`);
@@ -1109,7 +1443,8 @@
                 const cls = hc(ss.droppedFrames, [0, 0], [1, 3]);
                 parts.push(`<span class="${cls}">drop=${ss.droppedFrames}</span>`);
               }
-              if (parts.length) srvParts.push(`<span class="eye">${eyeLabel(mid, mids.indexOf(mid))}</span>${parts.join(" ")}`);
+              const label = ss.eye ? (ss.eye === "left" ? "L" : "R") : eyeLabel(mid, mids.indexOf(mid));
+              if (parts.length) srvParts.push(`<span class="eye">${label}</span>${parts.join(" ")}`);
             }
             if (srvParts.length) {
               html += statRow("Server", srvParts.join('<span class="sep">/</span>'));
@@ -1117,6 +1452,7 @@
 
             statsPanel.innerHTML = html || statRow("", '<span class="h-dim">waiting for data...</span>');
             monitorConnection._prev = { t: now, framesByMid, inboundByMid, bytesByMid, droppedByMid };
+            if (recorderState.active) recorderState.ticks.push(tick);
           } catch (err) {
             console.warn("getStats failed", err);
           }
@@ -1172,38 +1508,66 @@
         leftVideo.srcObject = null;
         rightVideo.srcObject = null;
         rightVideo.style.display = "none";
+        resetE2EState();
+        streamConfig = null;
 
         pc = new RTCPeerConnection({
           iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }],
         });
 
-        // DataChannel for RTT pings + server stats
+        // DataChannel for clock sync, config, frame timestamps and server stats
         latencyDc = pc.createDataChannel("latency");
         latencyState.supported = true;
         latencyDc.addEventListener("open", () => {
           if (latencyState.timer) clearInterval(latencyState.timer);
-          latencyState.timer = setInterval(() => {
+          latencyState.offsetSamples = [];
+          latencyState.offsetUs = null;
+          latencyState.offsetQualityMs = null;
+          const sendPing = () => {
             if (!latencyDc || latencyDc.readyState !== "open") return;
             const seq = latencyState.seq++;
             const t = performance.now();
             latencyState.pending.set(seq, t);
             latencyDc.send(JSON.stringify({ type: "ping", seq, t }));
-          }, 500);
+          };
+          // Fast pings first so the clock offset converges within ~3s,
+          // then back off to a maintenance cadence (drift correction).
+          let fastPings = 30;
+          const arm = () => {
+            latencyState.timer = setInterval(() => {
+              sendPing();
+              if (fastPings > 0 && --fastPings === 0) {
+                clearInterval(latencyState.timer);
+                latencyState.timer = setInterval(sendPing, 500);
+              }
+            }, 100);
+          };
+          arm();
         });
         latencyDc.addEventListener("message", (event) => {
+          const t3 = performance.now();
           if (typeof event.data !== "string") return;
           let msg;
           try { msg = JSON.parse(event.data); } catch { return; }
+          if (!msg) return;
 
-          if (msg && msg.type === "pong" && typeof msg.seq === "number") {
+          if (msg.type === "pong" && typeof msg.seq === "number") {
             const sentT = latencyState.pending.get(msg.seq);
             latencyState.pending.delete(msg.seq);
             if (typeof sentT === "number") {
-              const rtt = performance.now() - sentT;
-              latencyState.ewmaRttMs = latencyState.ewmaRttMs == null ? rtt : latencyState.ewmaRttMs * 0.8 + rtt * 0.2;
+              let rtt = t3 - sentT;
+              if (typeof msg.srx === "number" && typeof msg.stx === "number") {
+                rtt = updateClockOffset(sentT, msg.srx, msg.stx, t3);
+              }
+              if (Number.isFinite(rtt) && rtt >= 0) {
+                latencyState.ewmaRttMs = latencyState.ewmaRttMs == null ? rtt : latencyState.ewmaRttMs * 0.8 + rtt * 0.2;
+              }
             }
-          }
-          if (msg && msg.type === "server_stats" && msg.mid != null) {
+          } else if (msg.type === "config") {
+            streamConfig = msg;
+          } else if (msg.type === "frame_ts" && msg.eye && Array.isArray(msg.e)) {
+            ingestFrameTs(msg.eye, msg.e);
+          } else if (msg.type === "server_stats" && msg.mid != null) {
             serverStats.prevByMid[msg.mid] = serverStats.byMid[msg.mid] || null;
             serverStats.byMid[msg.mid] = { ...msg, t: performance.now() };
           }
@@ -1212,20 +1576,24 @@
           latencyState.supported = false;
           latencyState.pending.clear();
           latencyState.ewmaRttMs = null;
+          latencyState.offsetSamples = [];
+          latencyState.offsetUs = null;
+          latencyState.offsetQualityMs = null;
           if (latencyState.timer) { clearInterval(latencyState.timer); latencyState.timer = null; }
         });
 
         pc.addEventListener("track", (event) => {
           if (event.track.kind !== "video") return;
 
-          try { if (event.receiver && typeof event.receiver.playoutDelayHint === "number") event.receiver.playoutDelayHint = receiverTuning.playoutDelayHintS; } catch {}
-          try { if (event.receiver && typeof event.receiver.jitterBufferTarget === "number") event.receiver.jitterBufferTarget = parseJbTargetMs() / 1000; } catch {}
+          receiverTuning.jitterBufferTargetMs = parseJbTargetMs();
+          tuneReceiver(event.receiver);
 
           const stream = event.streams[0] || new MediaStream([event.track]);
           if (!leftStream) {
             leftStream = stream;
             leftVideo.srcObject = leftStream;
             leftVideo.play().catch((e) => console.warn("left play() failed", e));
+            attachE2E(leftVideo, "left");
             setConnectionStep(2); // Buffering...
             log("Left eye connected.");
           } else if (!rightStream) {
@@ -1233,6 +1601,7 @@
             rightVideo.srcObject = rightStream;
             rightVideo.style.display = "block";
             rightVideo.play().catch((e) => console.warn("right play() failed", e));
+            attachE2E(rightVideo, "right");
             setConnectionStep(2); // Buffering...
             log("Both eyes connected.");
           } else {

@@ -6,3 +6,4 @@ data/
 *.pts
 *.mp4
 capture-output/
+reports/

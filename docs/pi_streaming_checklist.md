@@ -18,16 +18,23 @@ make python-deps
 
 ## Verify Config
 
-Check that `config/camera_profiles.yaml` has the optimized encoder settings for both cam0 and cam1:
+Check that `config/camera_profiles.yaml` has the encoder settings you intend for both cam0 and cam1:
 
 ```yaml
 bitrate_mbps: 40.0
-h264_profile: baseline    # no B-frames = no reordering latency
-gop_frames: 2             # IDR every 2 frames = ~36ms recovery on loss
-repeat_headers: true       # SPS/PPS on every keyframe for stream resilience
+h264_profile: baseline    # no B-frames = no reordering latency (code default is "high"!)
+gop_frames: 2             # optional; without it the GOP defaults to 1 second
+repeat_headers: true      # SPS/PPS on every keyframe for stream resilience
 ```
 
-If any of these are missing, the defaults will be suboptimal (high profile with B-frames, 1-second GOP).
+If `h264_profile`/`gop_frames` are missing, the defaults are high profile and a 1-second
+GOP — with a 1s GOP a single lost keyframe freezes the stream for up to a second, and
+PLI-triggered keyframes do NOT work on this server (aiortc ignores keyframe requests for
+pre-encoded tracks).
+
+> **Note (Pi 5):** despite the class name, `picamera2.encoders.H264Encoder` is
+> SOFTWARE x264 on the Pi 5 — the BCM2712 has no H.264 hardware encoder. Encoder
+> settings here are x264 settings, and encode cost is CPU, not ISP.
 
 ## Start Streaming
 
@@ -74,11 +81,22 @@ After clicking "Start Stream" in the browser, the HUD should show 6 rows. Here's
 - **0x0**: Track not decoding yet, wait a few seconds
 
 ### Latency
-- **rtt**: Network round-trip. Green <10ms on LAN, yellow 10-30ms, red >30ms
+- **rtt**: Network round-trip (labelled `dc` when measured over the datachannel, `ice` as fallback). Green <10ms on LAN, yellow 10-30ms, red >30ms
 - **jb (L/R)**: Jitter buffer per eye. Green <20ms, yellow 20-60ms, red >60ms
   - High JB = bursty frame delivery or network jitter
-  - Try lowering JB target in the HUD input (default 10ms, try 0)
+  - The JB target HUD input is applied in milliseconds (default 0)
 - **dec**: Decode time per frame. Should be <5ms on modern hardware
+
+### E2E (capture → render, the headline latency metric)
+- Shows per-eye p50/p95 of true capture-to-render latency, measured per frame by
+  matching `requestVideoFrameCallback` RTP timestamps against server capture
+  timestamps (clock-synced over the datachannel). Green ≤25ms, yellow ≤35ms.
+- `pi/net/buf` breakdown: Pi capture+encode / network+pacing / client buffer+decode+present.
+- `sync±x` is the clock-offset confidence — treat E2E as suspect if it exceeds ~2ms.
+- `locking...` for the first ~1s is normal (RTP origin recovery). `stale` means
+  frames stopped presenting; `n/a` means the browser lacks rVFC.
+- On the Pi, watch the server's startup `[CLOCK]` line: if it says SUSPECT, the
+  camera PTS clock domain is wrong and E2E values cannot be trusted.
 
 ### Network
 - **jit**: Packet jitter. <10ms is good on LAN
@@ -89,8 +107,10 @@ After clicking "Start Stream" in the browser, the HUD should show 6 rows. Here's
 
 ### Server
 - **L/R bitrate**: Server-side encoding bitrate (should match client-side Bitrate row)
-- **kf**: Cumulative keyframes sent. With `gop_frames: 2`, this should increment rapidly (~28/sec at 56fps)
-- **drop**: Broadcaster dropped frames. Should be 0. If >0, encoder or network can't keep up
+- **fps / kf**: Frames and keyframes counted at the encoder output (authoritative —
+  aiortc's own outbound stats carry no frame counts). kf rate should match your GOP:
+  `framerate / gop_frames` per second.
+- **drop**: Broadcaster dropped frames per eye. Should be 0. If >0, encoder or network can't keep up
 
 ## Verifying Optimizations
 
@@ -101,15 +121,10 @@ H264Encoder(..., profile='baseline', ...)
 ```
 Or check that the encoder isn't producing B-frames (no reordering latency visible in JB stats).
 
-### 2. GOP = 2 (fast keyframe recovery)
-In the HUD's Server row, `kf=` should increment rapidly. At 56fps with gop_frames=2, expect ~28 keyframes/sec. If kf stays at 0 or increments slowly, the gop setting isn't taking effect.
-
-You can also watch the Pi's terminal:
-```
-[DEBUG] left keyframe <pts>
-[DEBUG] right keyframe <pts>
-```
-These should appear every 2 frames.
+### 2. GOP taking effect
+In the HUD's Server row, `kf=` should increment at `framerate / gop_frames` per second.
+If kf stays at 0 or increments once a second when you configured a short GOP, the
+setting isn't taking effect.
 
 ### 3. Broadcaster Queue Fix
 If the Pi is under load and dropping frames, you'll see:
@@ -151,14 +166,46 @@ The Server row in the HUD should populate with per-eye bitrate, keyframe count, 
 - If persistent, the WebRTC connection may not have completed (check browser console)
 
 ### Red FPS even though video looks smooth
-- The FPS target auto-detects from observed framerate. If one eye briefly dips, the target may snap to a lower value. This is cosmetic.
+- The FPS target comes from the server's config message (falls back to inference only
+  if that hasn't arrived). If it disagrees with your configured framerate, check the
+  server terminal for datachannel errors.
 
-## Performance Targets (Pi on LAN)
+## Recording a Baseline (before/after any optimization)
+
+1. Fixed scene and lighting, same network, 30s warm-up after connect.
+2. Click **Rec 60s** in the HUD. The report (every HUD metric per 250ms tick plus
+   every raw per-frame E2E sample) is POSTed to the server and saved under `reports/`.
+3. Repeat 3×, compare medians:
+   ```bash
+   python scripts/compare_reports.py reports/report-<before>.json reports/report-<after>.json
+   ```
+Never compare runs recorded with different scenes, networks, or configs.
+
+## Physical Glass-to-Glass Measurement (ground truth, no software trust)
+
+The software E2E metric must be certified against physics once per setup:
+
+1. Open `https://<pi-ip>:8443/static/blink.html` on a monitor. Point the Pi camera at it
+   (fill ~¼ of the frame). The panel flips black↔white every 500ms.
+2. Start the stream. Put the Quest lens-side-up next to the monitor so a phone on a
+   stand can film **both** the monitor and one Quest eyepiece in a single shot.
+3. Record ~20s of 240fps slo-mo on the phone.
+4. Scrub frame-by-frame: for ≥10 flips, count phone frames between the monitor flip and
+   the same flip appearing in the Quest lens. Latency = frames × 4.17ms.
+5. Report median and IQR (resolution ±4.2ms).
+6. **Calibration gate**: physical median should exceed the HUD E2E p50 by roughly one
+   display frame (~7–14ms, compositor + persistence). If they disagree by more than
+   ~15ms beyond that, the software metric is broken (clock sync or PTS domain) — fix it
+   before trusting any optimization numbers.
+
+## Performance Targets (Pi on LAN, 72fps / <25ms goal)
 
 | Metric | Good | Acceptable | Problem |
 |--------|------|------------|---------|
-| FPS | 54-58 | 45-54 | <45 |
-| Bitrate | 35-45 Mbps | 20-35 Mbps | <20 Mbps |
+| E2E p50 (software) | ≤18ms | 18-28ms | >28ms |
+| Glass-to-glass (blink test) | ≤25ms | 25-35ms | >35ms |
+| FPS | ≥0.97× target | 0.9-0.97× | <0.9× |
+| Bitrate | 0.7-1.3× config | 0.4-0.7× | <0.4× |
 | RTT | <5ms | 5-15ms | >30ms |
 | JB | <15ms | 15-40ms | >60ms |
 | Decode | <3ms | 3-8ms | >15ms |

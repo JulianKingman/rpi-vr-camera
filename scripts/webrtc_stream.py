@@ -43,6 +43,7 @@ except ImportError:
     Output = None  # type: ignore[assignment, misc]
 
 from cam_utils import build_transform, resolve_awb_mode
+from stream_metrics import FrameTimestampLog, PtsClockCheck, boottime_us, save_report
 from aiortc.codecs import h264 as h264_codecs
 
 MICROSECOND_TIME_BASE = Fraction(1, 1_000_000)
@@ -557,6 +558,8 @@ class HardwareEncoderOutput(Output if Output is not None else object):
         self._broadcaster = broadcaster
         self._name = name
         self._shared_epoch = shared_epoch
+        self.ts_log = FrameTimestampLog()
+        self._clock_check = PtsClockCheck(name)
 
     def outputframe(self, frame, keyframe: bool = True, timestamp: Optional[int] = None, packet=None, audio: bool = False):
         if audio or not self.recording:
@@ -578,16 +581,23 @@ class HardwareEncoderOutput(Output if Output is not None else object):
             print(f"[ERROR] {self._name}: frame has no timestamp, skipping", file=sys.stderr, flush=True)
             return
 
+        self._clock_check.sample(pts)
         relative_pts = self._shared_epoch.relativize(pts)
+        resolved_time_base = time_base if isinstance(time_base, Fraction) else MICROSECOND_TIME_BASE
 
         sample = EncodedSample(
             data=data_bytes,
             pts=relative_pts,
-            time_base=time_base if isinstance(time_base, Fraction) else MICROSECOND_TIME_BASE,
+            time_base=resolved_time_base,
             keyframe=bool(keyframe),
         )
-        if keyframe:
-            print(f"[DEBUG] {self._name} keyframe {relative_pts}", flush=True)
+        self.ts_log.record(
+            pts=relative_pts,
+            time_base=resolved_time_base,
+            capture_us=pts,
+            enc_done_us=boottime_us(),
+            keyframe=bool(keyframe),
+        )
         self._broadcaster.publish(sample)
         if Output is not None and hasattr(self, 'outputtimestamp'):
             self.outputtimestamp(pts)
@@ -942,14 +952,37 @@ class WebRTCServer:
         pc = RTCPeerConnection()
         self.pcs.add(pc)
 
-        self._stats_channel = None
+        stats_channel: Optional[object] = None
+
+        def build_config_message() -> str:
+            eyes = {}
+            for label, camera in (("left", self.capture.left), ("right", self.capture.right)):
+                if camera is None:
+                    continue
+                profile = camera.profile
+                eyes[label] = {
+                    "bitrateMbps": profile.get("bitrate_mbps"),
+                    "width": profile.get("resolution", [None, None])[0],
+                    "height": profile.get("resolution", [None, None])[1],
+                }
+            target_fps = None
+            if self.capture.left is not None:
+                target_fps = self.capture.left.profile.get("frame_rate")
+            return json.dumps({"type": "config", "targetFps": target_fps, "eyes": eyes})
 
         @pc.on("datachannel")
         def on_datachannel(channel) -> None:
-            self._stats_channel = channel
-            # HUD instrumentation channel (RTT ping). Minimal ping/pong protocol.
+            nonlocal stats_channel
+            stats_channel = channel
+            # HUD instrumentation channel: ping/pong clock sync + config push.
+            try:
+                channel.send(build_config_message())
+            except Exception as exc:  # noqa: BLE001
+                print(f"[WARN] Failed to send config message: {exc}", file=sys.stderr)
+
             @channel.on("message")
             def on_message(message) -> None:
+                srx = boottime_us()
                 if not isinstance(message, str):
                     return
                 try:
@@ -962,7 +995,15 @@ class WebRTCServer:
                     and isinstance(payload.get("seq"), int)
                     and isinstance(payload.get("t"), (int, float))
                 ):
-                    channel.send(json.dumps({"type": "pong", "seq": payload["seq"], "t": payload["t"]}))
+                    # NTP-style: srx/stx let the client estimate clock offset,
+                    # not just round-trip time.
+                    channel.send(json.dumps({
+                        "type": "pong",
+                        "seq": payload["seq"],
+                        "t": payload["t"],
+                        "srx": srx,
+                        "stx": boottime_us(),
+                    }))
 
         offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
         try:
@@ -994,7 +1035,7 @@ class WebRTCServer:
         stereo_tracks = [("left", left_track), ("right", right_track)]
 
         video_transceivers = [t for t in pc.getTransceivers() if t.kind == "video"]
-        created_transceivers: list[tuple[str, RTCRtpSender, HardwareVideoTrack]] = []
+        created_transceivers: list[tuple[str, object, RTCRtpSender, HardwareVideoTrack]] = []
 
         if len(video_transceivers) < len(stereo_tracks):
             print(
@@ -1026,7 +1067,7 @@ class WebRTCServer:
                     content_type="application/json",
                     text=json.dumps({"error": f"Unable to attach {label} track."}),
                 )
-            created_transceivers.append((label, sender, track))
+            created_transceivers.append((label, transceiver, sender, track))
 
         # Stop any unused hardware tracks to release encoder resources.
         for label, track in stereo_tracks[len(video_transceivers) :]:
@@ -1049,7 +1090,7 @@ class WebRTCServer:
 
         async def _handle_state_change() -> None:
             if pc.connectionState in {"failed", "closed"}:
-                for _, _, track in created_transceivers:
+                for _, _, _, track in created_transceivers:
                     track.stop()
                 audio_track.stop()
                 await pc.close()
@@ -1071,48 +1112,93 @@ class WebRTCServer:
                 text=json.dumps({"error": str(exc)}),
             )
 
+        cameras = {"left": self.capture.left, "right": self.capture.right}
+
         async def log_sender_stats() -> None:
+            tick = 0
             try:
                 while pc.connectionState not in {"failed", "closed"}:
-                    stats = await pc.getStats()
-                    track_idx = 0
-                    for report in stats.values():
-                        if report.type == "outbound-rtp" and getattr(report, "kind", None) == "video":
-                            mid = getattr(report, "mid", None) or str(track_idx)
-                            bytes_sent = getattr(report, "bytesSent", 0)
-                            frames_sent = getattr(report, "framesSent", 0)
-                            key_frames_sent = getattr(report, "keyFramesSent", 0)
+                    tick += 1
+                    for label, transceiver, sender, _ in created_transceivers:
+                        camera = cameras.get(label)
+                        if camera is None:
+                            continue
+                        stats = await sender.getStats()
+                        bytes_sent = 0
+                        packets_sent = 0
+                        for report in stats.values():
+                            if report.type == "outbound-rtp":
+                                bytes_sent = getattr(report, "bytesSent", 0)
+                                packets_sent = getattr(report, "packetsSent", 0)
+                        # aiortc outbound stats carry no frame counts; use the
+                        # encoder-output counters, which are authoritative.
+                        ts_log = camera.output.ts_log
+                        message = {
+                            "type": "server_stats",
+                            "mid": transceiver.mid,
+                            "eye": label,
+                            "bytesSent": bytes_sent,
+                            "packetsSent": packets_sent,
+                            "framesSent": ts_log.frames,
+                            "keyFramesSent": ts_log.keyframes,
+                            "droppedFrames": camera.broadcaster._drop_count,
+                        }
+                        if tick % 5 == 0:
                             print(
-                                f"[STATS] mid={mid} "
-                                f"bytes={bytes_sent} "
-                                f"frames={frames_sent} "
-                                f"keyFrames={key_frames_sent}",
+                                f"[STATS] eye={label} mid={transceiver.mid} bytes={bytes_sent} "
+                                f"frames={ts_log.frames} keyFrames={ts_log.keyframes} "
+                                f"drops={camera.broadcaster._drop_count}",
                                 flush=True,
                             )
-                            if self._stats_channel and self._stats_channel.readyState == "open":
-                                drop_count = self.capture.left.broadcaster._drop_count + self.capture.right.broadcaster._drop_count
-                                try:
-                                    self._stats_channel.send(json.dumps({
-                                        "type": "server_stats",
-                                        "mid": mid,
-                                        "bytesSent": bytes_sent,
-                                        "framesSent": frames_sent,
-                                        "keyFramesSent": key_frames_sent,
-                                        "droppedFrames": drop_count,
-                                    }))
-                                except Exception:
-                                    pass
-                            track_idx += 1
+                        if stats_channel is not None and stats_channel.readyState == "open":
+                            try:
+                                stats_channel.send(json.dumps(message))
+                            except Exception:
+                                pass
                     await asyncio.sleep(1.0)
             except Exception as exc:  # noqa: BLE001
                 print(f"[WARN] stats logger stopped: {exc}", file=sys.stderr)
 
+        async def send_frame_ts() -> None:
+            # Stream (pts90k -> capture/encode-done) mappings so the client can
+            # compute per-frame capture->render latency from rVFC rtpTimestamps.
+            cursors = {label: 0 for label in cameras}
+            try:
+                while pc.connectionState not in {"failed", "closed"}:
+                    if stats_channel is not None and stats_channel.readyState == "open":
+                        for label, camera in cameras.items():
+                            if camera is None:
+                                continue
+                            entries, cursors[label] = camera.output.ts_log.since(cursors[label])
+                            if entries:
+                                try:
+                                    stats_channel.send(json.dumps(
+                                        {"type": "frame_ts", "eye": label, "e": entries}
+                                    ))
+                                except Exception:
+                                    pass
+                    await asyncio.sleep(0.1)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[WARN] frame_ts sender stopped: {exc}", file=sys.stderr)
+
         asyncio.create_task(log_sender_stats())
+        asyncio.create_task(send_frame_ts())
 
         return web.Response(
             content_type="application/json",
             text=json.dumps({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}),
         )
+
+    async def report(self, request: web.Request) -> web.Response:
+        if request.content_length and request.content_length > 5_000_000:
+            return web.Response(status=413, text="Report too large.")
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.Response(status=400, text="Invalid JSON.")
+        path = save_report(payload, REPO_ROOT / "reports")
+        print(f"[REPORT] saved {path}", flush=True)
+        return web.json_response({"saved": str(path)})
 
     async def cleanup(self) -> None:
         coros = [pc.close() for pc in list(self.pcs)]
@@ -1406,6 +1492,7 @@ async def run_streamer(
     app.router.add_post("/offer", server.offer)
     app.router.add_get("/api/settings", server.get_settings)
     app.router.add_post("/api/settings", server.post_settings)
+    app.router.add_post("/report", server.report)
     app.router.add_static("/static/", STATIC_DIR, show_index=True)
     if ca_cert_path:
         app.router.add_get("/ca.crt", server.serve_ca_certificate)
