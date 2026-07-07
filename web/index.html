@@ -528,9 +528,9 @@
       <h1>VR Camera Preview</h1>
       <p>
         WebRTC stereo stream from Raspberry Pi.
-        On Quest, open <code>https://rpi-vr-camera.local:8443</code>
-        (or <code>https://&lt;pi-ip&gt;:8443</code>) after installing the CA cert.
-        Run <code>make install-mdns</code> on the Pi to enable the <code>.local</code> hostname.
+        On Quest, open <code>http://&lt;pi-ip&gt;:8443</code>. For immersive "Enter VR",
+        first whitelist that exact origin in the Quest browser's
+        <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code> (set Enabled, relaunch).
       </p>
     </header>
     <p id="caSection" style="display:none;">
@@ -555,6 +555,7 @@
         </div>
         <div class="settings-actions">
           <button id="settingsCancelBtn" type="button">Cancel</button>
+          <button id="settingsRestartBtn" type="button" style="display:none;background:#e65100;">Restart Now</button>
           <button id="settingsApplyBtn" type="button">Apply</button>
         </div>
         <div id="settingsFeedback"></div>
@@ -641,7 +642,8 @@
       let rightTexture = null;
       let shaderProgram = null;
       let positionBuffer = null;
-      let texcoordBuffer = null;
+      let leftTexcoordBuffer = null;
+      let rightTexcoordBuffer = null;
       let attribPosition = null;
       let attribTexCoord = null;
       let uniformTexture = null;
@@ -649,6 +651,67 @@
       let rightStream = null;
       let latencyDc = null;
       let userInitiatedStop = false;
+
+      /* ── Display orientation (rotation/flip) ──
+         Applied entirely client-side so changes are live: WebGL texcoords in VR,
+         CSS transform for the 2D preview. cam0 = left eye, cam1 = right eye. */
+      const camOrientation = {
+        cam0: { rotation: 0, hflip: false, vflip: false },
+        cam1: { rotation: 0, hflip: false, vflip: false },
+      };
+
+      function orientedUV(o) {
+        // Texture corners in screen order BL, BR, TR, TL for an unrotated image.
+        let c = [[0, 0], [1, 0], [1, 1], [0, 1]];
+        // Match CSS `rotate(r) scaleX/Y(-1)` semantics: the flips act on the IMAGE
+        // (before rotation), then the flipped image is rotated. Flipping after the
+        // rotation instead would swap h/v flips whenever rot is 90/270.
+        if (o.hflip) c = [c[1], c[0], c[3], c[2]];
+        if (o.vflip) c = [c[3], c[2], c[1], c[0]];
+        const rot = (((o.rotation || 0) % 360) + 360) % 360;
+        for (let s = 0; s < rot / 90; s++) c = [c[1], c[2], c[3], c[0]]; // 90° CW per step
+        const [bl, br, tr, tl] = c;
+        // Two triangles: BL,BR,TL + TL,BR,TR (matches the position quad)
+        return new Float32Array([...bl, ...br, ...tl, ...tl, ...br, ...tr]);
+      }
+
+      function cssTransformFor(o) {
+        const parts = [];
+        const rot = (((o.rotation || 0) % 360) + 360) % 360;
+        if (rot) parts.push(`rotate(${rot}deg)`);
+        if (o.hflip) parts.push("scaleX(-1)");
+        if (o.vflip) parts.push("scaleY(-1)");
+        // Shrink 90/270 so the swapped aspect still fits the preview box.
+        if (rot === 90 || rot === 270) parts.push("scale(0.5625)");
+        return parts.join(" ");
+      }
+
+      function applyOrientation() {
+        leftVideo.style.transform = cssTransformFor(camOrientation.cam0);
+        rightVideo.style.transform = cssTransformFor(camOrientation.cam1);
+        if (gl && leftTexcoordBuffer) {
+          gl.bindBuffer(gl.ARRAY_BUFFER, leftTexcoordBuffer);
+          gl.bufferData(gl.ARRAY_BUFFER, orientedUV(camOrientation.cam0), gl.STATIC_DRAW);
+          gl.bindBuffer(gl.ARRAY_BUFFER, rightTexcoordBuffer);
+          gl.bufferData(gl.ARRAY_BUFFER, orientedUV(camOrientation.cam1), gl.STATIC_DRAW);
+        }
+      }
+
+      async function refreshOrientation() {
+        try {
+          const resp = await fetch("/api/settings");
+          if (!resp.ok) return;
+          const data = await resp.json();
+          for (const cam of ["cam0", "cam1"]) {
+            if (data[cam]) {
+              camOrientation[cam].rotation = Number(data[cam].rotation) || 0;
+              camOrientation[cam].hflip = !!data[cam].hflip;
+              camOrientation[cam].vflip = !!data[cam].vflip;
+            }
+          }
+          applyOrientation();
+        } catch {} // non-fatal: orientation just stays as-is
+      }
 
       // jitterBufferTarget is spec'd in MILLISECONDS (0-4000); playoutDelayHint
       // is in seconds. Both default to null in Chromium, so feature-detect with
@@ -1155,6 +1218,15 @@
       /* ── Stats monitor ── */
 
       let statsTimer = null;
+      // TEMP DIAGNOSTIC: distinguish "page reloaded/suspended" from "connection died"
+      // in the server log. sendBeacon still fires during unload.
+      window.addEventListener("pagehide", () => {
+        try { navigator.sendBeacon("/beacon", JSON.stringify({ event: "pagehide" })); } catch {}
+      });
+      document.addEventListener("visibilitychange", () => {
+        try { navigator.sendBeacon("/beacon", JSON.stringify({ event: "visibility", vis: document.visibilityState })); } catch {}
+      });
+
       function monitorConnection(connection) {
         if (statsTimer) clearInterval(statsTimer);
         // Reset cached state so a reconnect doesn't produce garbage first-tick deltas.
@@ -1196,6 +1268,25 @@
 
             const mids = Object.keys(framesByMid).sort();
             if (!mids.length) return;
+
+            // TEMP DIAGNOSTIC: beacon the browser's own decode stats to the server
+            // log once per second, so receive-side behaviour is visible from the Pi.
+            monitorConnection._beaconTick = (monitorConnection._beaconTick || 0) + 1;
+            if (monitorConnection._beaconTick % 4 === 0) {
+              const beacon = { vis: document.visibilityState, cs: connection.connectionState };
+              mids.forEach((mid, i) => {
+                const r = inboundByMid[mid];
+                if (!r) return;
+                beacon[eyeLabel(mid, i)] = {
+                  recv: r.framesReceived, dec: r.framesDecoded, drop: r.framesDropped,
+                  key: r.keyFramesDecoded, w: r.frameWidth, h: r.frameHeight,
+                  freeze: r.freezeCount, pli: r.pliCount, nack: r.nackCount,
+                  jbMs: r.jitterBufferEmittedCount ? Math.round((1000 * r.jitterBufferDelay) / r.jitterBufferEmittedCount) : null,
+                  impl: r.decoderImplementation,
+                };
+              });
+              fetch("/beacon", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(beacon) }).catch(() => {});
+            }
 
             let html = "";
             const tick = { t: Math.round(now) };
@@ -1588,8 +1679,15 @@
           receiverTuning.jitterBufferTargetMs = parseJbTargetMs();
           tuneReceiver(event.receiver);
 
-          const stream = event.streams[0] || new MediaStream([event.track]);
-          if (!leftStream) {
+          // Wrap each track in its OWN MediaStream. aiortc can reuse one msid for
+          // both senders, making event.streams[0] the SAME object for both track
+          // events — a <video> element plays a stream's first video track, so both
+          // eyes would show camera 0. Route by transceiver mid (server answers
+          // mid 0 = left, mid 1 = right), falling back to arrival order.
+          const stream = new MediaStream([event.track]);
+          const mid = event.transceiver ? event.transceiver.mid : null;
+          const isLeft = mid === "0" || (mid !== "1" && !leftStream);
+          if (isLeft && !leftStream) {
             leftStream = stream;
             leftVideo.srcObject = leftStream;
             leftVideo.play().catch((e) => console.warn("left play() failed", e));
@@ -1703,16 +1801,18 @@
         gl.deleteShader(vShader); gl.deleteShader(fShader);
 
         const quad = [-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1];
-        const uv = [0,0, 1,0, 0,1, 0,1, 1,0, 1,1];
         positionBuffer = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
         gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(quad), gl.STATIC_DRAW);
         attribPosition = gl.getAttribLocation(shaderProgram, "aPosition");
         gl.enableVertexAttribArray(attribPosition); gl.vertexAttribPointer(attribPosition, 2, gl.FLOAT, false, 0, 0);
 
-        texcoordBuffer = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(uv), gl.STATIC_DRAW);
+        // Per-eye texcoord buffers so each camera's rotation/flip applies independently.
+        leftTexcoordBuffer = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, leftTexcoordBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, orientedUV(camOrientation.cam0), gl.STATIC_DRAW);
+        rightTexcoordBuffer = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, rightTexcoordBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, orientedUV(camOrientation.cam1), gl.STATIC_DRAW);
         attribTexCoord = gl.getAttribLocation(shaderProgram, "aTexCoord");
-        gl.enableVertexAttribArray(attribTexCoord); gl.vertexAttribPointer(attribTexCoord, 2, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(attribTexCoord);
 
         uniformTexture = gl.getUniformLocation(shaderProgram, "uTexture");
         gl.uniform1i(uniformTexture, 0); gl.activeTexture(gl.TEXTURE0);
@@ -1771,12 +1871,13 @@
         if (rightStream) update(rightTexture, rightVideo);
         gl.clear(gl.COLOR_BUFFER_BIT); gl.useProgram(shaderProgram);
         gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer); gl.vertexAttribPointer(attribPosition, 2, gl.FLOAT, false, 0, 0);
-        gl.bindBuffer(gl.ARRAY_BUFFER, texcoordBuffer); gl.vertexAttribPointer(attribTexCoord, 2, gl.FLOAT, false, 0, 0);
         for (let i = 0; i < pose.views.length; i++) {
           const view = pose.views[i];
           const vp = layer.getViewport(view);
           gl.viewport(vp.x, vp.y, vp.width, vp.height);
           const useRight = (view.eye && view.eye.toLowerCase() === "right") || i === 1;
+          gl.bindBuffer(gl.ARRAY_BUFFER, useRight && rightStream ? rightTexcoordBuffer : leftTexcoordBuffer);
+          gl.vertexAttribPointer(attribTexCoord, 2, gl.FLOAT, false, 0, 0);
           gl.bindTexture(gl.TEXTURE_2D, useRight && rightStream ? rightTexture : leftTexture);
           gl.drawArrays(gl.TRIANGLES, 0, 6);
         }
@@ -1797,6 +1898,7 @@
       const settingsCloseBtn = $("settingsCloseBtn");
       const settingsCancelBtn = $("settingsCancelBtn");
       const settingsApplyBtn = $("settingsApplyBtn");
+      const settingsRestartBtn = $("settingsRestartBtn");
       const settingsFeedback = $("settingsFeedback");
       const settingsCamForms = $("settingsCamForms");
 
@@ -1807,6 +1909,18 @@
         settingsFeedback.className = "";
         settingsFeedback.style.display = "none";
         settingsFeedback.textContent = "";
+        settingsRestartBtn.style.display = "none";
+      }
+
+      async function restartServer() {
+        settingsRestartBtn.disabled = true;
+        try {
+          await fetch("/api/restart", { method: "POST" });
+        } catch {} // server may drop the socket mid-response; that's fine
+        settingsRestartBtn.disabled = false;
+        closeSettings();
+        resetAutoConnectAttempt();
+        scheduleAutoConnect("Server restarting to apply settings...");
       }
 
       function buildCamForm(camName, profile) {
@@ -1850,6 +1964,27 @@
                 <input type="range" name="colour_gain_blue" min="0" max="8" step="0.05"
                        value="${gains[1]}" />
                 <span class="range-value" data-for="colour_gain_blue">${Number(gains[1]).toFixed(2)}</span>
+                <span class="settings-tag runtime">live</span>
+              </div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-label">Rotation</div>
+              <div class="settings-input">
+                <select name="rotation">
+                  ${[0, 90, 180, 270].map(r => '<option value="' + r + '"' + (r === (profile.rotation || 0) ? " selected" : "") + '>' + r + '&deg;</option>').join("")}
+                </select>
+                <span class="settings-tag runtime">live</span>
+              </div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-label">Flip</div>
+              <div class="settings-input">
+                <label style="display:inline-flex;align-items:center;gap:4px;">
+                  <input type="checkbox" name="hflip" ${profile.hflip ? "checked" : ""} /> Horizontal
+                </label>
+                <label style="display:inline-flex;align-items:center;gap:4px;margin-left:10px;">
+                  <input type="checkbox" name="vflip" ${profile.vflip ? "checked" : ""} /> Vertical
+                </label>
                 <span class="settings-tag runtime">live</span>
               </div>
             </div>
@@ -1933,11 +2068,15 @@
           const get = (name) => section.querySelector('[name="' + name + '"]');
           const numVal = (name) => { const el = get(name); return el ? Number(el.value) : undefined; };
           const strVal = (name) => { const el = get(name); return el ? el.value : undefined; };
+          const boolVal = (name) => { const el = get(name); return el ? el.checked : undefined; };
 
           payload[cam] = {
             bitrate_mbps: numVal("bitrate_mbps"),
             awb_mode: strVal("awb_mode"),
             colour_gains: [numVal("colour_gain_red"), numVal("colour_gain_blue")],
+            rotation: numVal("rotation"),
+            hflip: boolVal("hflip"),
+            vflip: boolVal("vflip"),
             crop: [numVal("crop_w"), numVal("crop_h")],
             offset_x: numVal("offset_x"),
             offset_y: numVal("offset_y"),
@@ -1967,11 +2106,13 @@
             settingsFeedback.textContent = result.message || "Settings saved -- server restart required.";
             settingsFeedback.className = "warning";
             settingsFeedback.style.display = "block";
+            settingsRestartBtn.style.display = "inline-block";
           } else {
             settingsFeedback.textContent = result.message || "Settings applied.";
             settingsFeedback.className = "success";
             settingsFeedback.style.display = "block";
           }
+          if (result && result.ok) refreshOrientation(); // rotation/flip apply live
         } catch (err) {
           settingsFeedback.textContent = "Network error: " + err.message;
           settingsFeedback.className = "error";
@@ -1985,11 +2126,13 @@
       settingsCloseBtn.addEventListener("click", closeSettings);
       settingsCancelBtn.addEventListener("click", closeSettings);
       settingsApplyBtn.addEventListener("click", applySettings);
+      settingsRestartBtn.addEventListener("click", restartServer);
       settingsOverlay.addEventListener("click", (e) => {
         if (e.target === settingsOverlay) closeSettings();
       });
 
       /* ── Auto-connect on page load ── */
+      refreshOrientation();
       startStream();
     </script>
   </body>
