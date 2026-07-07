@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from typing import Dict, List, Optional, Tuple
 
 import yaml
@@ -43,8 +43,37 @@ except ImportError:
     Output = None  # type: ignore[assignment, misc]
 
 from cam_utils import build_transform, resolve_awb_mode
-from stream_metrics import FrameTimestampLog, PtsClockCheck, boottime_us, save_report
+from stream_metrics import FrameTimestampLog, PiLatencyMonitor, PtsClockCheck, boottime_us, save_report
 from aiortc.codecs import h264 as h264_codecs
+
+if PICAMERA2_AVAILABLE and H264Encoder is not None:
+
+    class SlicedThreadH264Encoder(H264Encoder):  # type: ignore[misc]
+        """x264 encoder forced into sliced-thread mode for low latency.
+
+        picamera2's LibavH264Encoder hardcodes ``thread_type = FRAME``, which makes
+        libavcodec set x264 ``sliced_threads=0`` — overriding the ``tune=zerolatency``
+        it applies later. Frame threading pipelines ~(threads-1) whole frames through
+        the encoder (measured ~240ms median at 56fps on the Pi 5). Sliced threading
+        splits each frame across the cores instead: same throughput, no pipeline.
+        The codec context stays configurable until the first encode opens it, so
+        overriding right after ``_start()`` is sufficient.
+        """
+
+        def __init__(self, *args, thread_count: int = 4, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._sliced_thread_count = thread_count
+
+        def _start(self):
+            super()._start()
+            ctx = getattr(getattr(self, "_stream", None), "codec_context", None)
+            if ctx is None:  # e.g. VC4 V4L2 hardware path — nothing to override
+                print("[WARN] SlicedThreadH264Encoder: no libav codec context; frame threading left as-is", flush=True)
+                return
+            ctx.thread_type = "SLICE"
+            ctx.thread_count = self._sliced_thread_count
+else:
+    SlicedThreadH264Encoder = None  # type: ignore[assignment, misc]
 
 MICROSECOND_TIME_BASE = Fraction(1, 1_000_000)
 
@@ -438,8 +467,11 @@ def print_ready_banner(
 
 # Settings that can be applied at runtime without restarting cameras
 RUNTIME_SETTINGS = {"awb_mode", "colour_gains", "bitrate_mbps", "awb_enable"}
+# Display-orientation settings: persisted here, but applied entirely client-side
+# (WebGL texcoords / CSS), so they take effect live with no camera involvement.
+CLIENT_SETTINGS = {"rotation", "hflip", "vflip"}
 # Settings that require a full server restart to take effect
-RESTART_SETTINGS = {"resolution", "rotation", "hflip", "vflip", "crop", "offset_x", "offset_y"}
+RESTART_SETTINGS = {"resolution", "encode_size", "encoder_threads", "crop", "offset_x", "offset_y"}
 
 
 def load_profile(name: str, config_path: Path) -> dict:
@@ -551,15 +583,22 @@ class EncodedStreamBroadcaster:
 class HardwareEncoderOutput(Output if Output is not None else object):
     """Picamera2 Output that forwards hardware encoded NAL units into asyncio queues."""
 
-    def __init__(self, loop: asyncio.AbstractEventLoop, broadcaster: EncodedStreamBroadcaster, name: str, shared_epoch: SharedEpoch):
+    def __init__(self, loop: asyncio.AbstractEventLoop, broadcaster: EncodedStreamBroadcaster, name: str, shared_epoch: SharedEpoch, encoder=None):
         if Output is not None:
             super().__init__()
         self._loop = loop
         self._broadcaster = broadcaster
         self._name = name
         self._shared_epoch = shared_epoch
+        # picamera2 rebases the encoder PTS to zero at the first frame, so packet.pts
+        # is stream-relative, not CLOCK_BOOTTIME. The encoder stashes the true sensor
+        # timestamp of that first frame (boottime us) in `firsttimestamp`; adding it back
+        # reconstructs a real boottime capture time for the E2E metric.
+        self._encoder = encoder
         self.ts_log = FrameTimestampLog()
         self._clock_check = PtsClockCheck(name)
+        self._pi_latency = PiLatencyMonitor(name)
+        self._nal_debug_left = 4  # TEMP DIAGNOSTIC: dump NAL structure of first frames
 
     def outputframe(self, frame, keyframe: bool = True, timestamp: Optional[int] = None, packet=None, audio: bool = False):
         if audio or not self.recording:
@@ -581,7 +620,36 @@ class HardwareEncoderOutput(Output if Output is not None else object):
             print(f"[ERROR] {self._name}: frame has no timestamp, skipping", file=sys.stderr, flush=True)
             return
 
-        self._clock_check.sample(pts)
+        # Reconstruct the true CLOCK_BOOTTIME capture timestamp. `pts` here is
+        # stream-relative microseconds (picamera2 rebased it to zero at frame 0);
+        # `encoder.firsttimestamp` is the sensor boottime us of that first frame.
+        first_ts = getattr(self._encoder, "firsttimestamp", None) if self._encoder is not None else None
+        capture_us = pts + first_ts if first_ts is not None else pts
+
+        # TEMP DIAGNOSTIC: show whether the bitstream is Annex-B and which NAL types it carries.
+        if self._nal_debug_left > 0:
+            self._nal_debug_left -= 1
+            head = data_bytes[:24].hex(" ")
+            nal_types = []
+            i = 0
+            while i < len(data_bytes) - 4 and len(nal_types) < 8:
+                if data_bytes[i:i+3] == b"\x00\x00\x01":
+                    nal_types.append(data_bytes[i+3] & 0x1F)
+                    i += 3
+                elif data_bytes[i:i+4] == b"\x00\x00\x00\x01":
+                    nal_types.append(data_bytes[i+4] & 0x1F)
+                    i += 4
+                else:
+                    i += 1
+            print(
+                f"[NALDBG] {self._name}: len={len(data_bytes)} keyframe={keyframe} "
+                f"nal_types={nal_types} head={head}",
+                flush=True,
+            )
+
+        enc_done_us = boottime_us()
+        self._clock_check.sample(capture_us)
+        self._pi_latency.sample(capture_us, enc_done_us)
         relative_pts = self._shared_epoch.relativize(pts)
         resolved_time_base = time_base if isinstance(time_base, Fraction) else MICROSECOND_TIME_BASE
 
@@ -594,8 +662,8 @@ class HardwareEncoderOutput(Output if Output is not None else object):
         self.ts_log.record(
             pts=relative_pts,
             time_base=resolved_time_base,
-            capture_us=pts,
-            enc_done_us=boottime_us(),
+            capture_us=capture_us,
+            enc_done_us=enc_done_us,
             keyframe=bool(keyframe),
         )
         self._broadcaster.publish(sample)
@@ -696,16 +764,27 @@ class HardwareEncoderCamera:
         if encoder_rate.denominator == 1:
             encoder_rate = Fraction(int(target_rate * 1000), 1000)
 
-        self.camera = Picamera2(camera_num=index)
-        transform = build_transform(
-            int(self.profile.get("rotation", 0)),
-            bool(self.profile.get("hflip", False)),
-            bool(self.profile.get("vflip", False)),
-        )
+        # The encoded stream can be smaller than the sensor mode: the ScalerCrop ROI
+        # (~1000x1000 sensor px, ~500x500 real samples in the 2x2-binned mode) is
+        # upscaled by the ISP anyway, so encoding the full 2304x1296 only burns CPU.
+        # `encode_size` shrinks the main (encoded) stream while `sensor.output_size`
+        # pins the sensor mode to `resolution`, keeping FOV/crop behaviour identical.
+        encode_size = self.profile.get("encode_size")
+        main_size = resolution
+        try:
+            if encode_size and len(encode_size) == 2:
+                main_size = (int(encode_size[0]), int(encode_size[1]))
+        except Exception:  # noqa: BLE001
+            main_size = resolution
 
+        self.camera = Picamera2(camera_num=index)
+        # rotation/hflip/vflip are display orientation, applied CLIENT-side (WebGL
+        # texcoords / CSS) so they take effect live without a camera restart. The
+        # sensor pipeline couldn't do 90/270 anyway (no transpose support in the
+        # RPi ISP), so capture always runs untransformed.
         config = self.camera.create_video_configuration(
-            main={"size": resolution, "format": "YUV420"},
-            transform=transform,
+            main={"size": main_size, "format": "YUV420"},
+            sensor={"output_size": resolution},
             controls={"FrameRate": target_rate},
             buffer_count=4,
         )
@@ -753,15 +832,22 @@ class HardwareEncoderCamera:
 
         repeat_headers = bool(self.profile.get("repeat_headers", True))
         profile_name = self.profile.get("h264_profile", "high")
-        self.encoder = H264Encoder(
+        try:
+            encoder_threads = int(self.profile.get("encoder_threads", 4))
+        except Exception:  # noqa: BLE001
+            encoder_threads = 4
+        self.encoder = SlicedThreadH264Encoder(
             bitrate=self.bitrate_bps,
             iperiod=iperiod,
             framerate=encoder_rate,
             profile=profile_name,
             qp=qp,
             repeat=repeat_headers,
+            thread_count=encoder_threads,
         )
-        self.output = HardwareEncoderOutput(loop, self.broadcaster, description, shared_epoch)
+        if main_size != resolution:
+            print(f"[INFO] Camera {index}: sensor {resolution[0]}x{resolution[1]} -> encode {main_size[0]}x{main_size[1]}", flush=True)
+        self.output = HardwareEncoderOutput(loop, self.broadcaster, description, shared_epoch, encoder=self.encoder)
 
         try:
             self.camera.start_recording(self.encoder, self.output)
@@ -776,6 +862,28 @@ class HardwareEncoderCamera:
                 pass
             raise
         self._apply_runtime_controls(target_rate)
+
+        # TEMP DIAGNOSTIC: periodic AE/lux report, to tell light-starvation noise
+        # (high AnalogueGain) apart from magnification noise (low gain).
+        self._meta_running = True
+
+        def _meta_loop() -> None:
+            while self._meta_running:
+                try:
+                    md = self.camera.capture_metadata()
+                    gains = md.get("ColourGains")
+                    gains_s = f"({gains[0]:.2f},{gains[1]:.2f})" if gains else "?"
+                    print(
+                        f"[AEMETA] {description}: exp={md.get('ExposureTime')}us "
+                        f"again={md.get('AnalogueGain', 0):.2f} dgain={md.get('DigitalGain', 0):.2f} "
+                        f"lux={md.get('Lux', 0):.0f} colour_gains={gains_s}",
+                        flush=True,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(5)
+
+        Thread(target=_meta_loop, daemon=True).start()
 
         # Print camera initialization confirmation
         print_camera_init(index, description, resolution, target_rate)
@@ -828,8 +936,13 @@ class HardwareEncoderCamera:
             gains = updates["colour_gains"]
             if isinstance(gains, (list, tuple)) and len(gains) == 2:
                 self.profile["colour_gains"] = [float(gains[0]), float(gains[1])]
-                cam_controls["ColourGains"] = (float(gains[0]), float(gains[1]))
-                applied.append(f"colour_gains=[{gains[0]}, {gains[1]}]")
+                # Setting ColourGains disables AWB in libcamera and locks R/B at the
+                # given values (1.0/1.0 -> strong green cast). The UI always POSTs
+                # every field, so only forward the gains when AWB is actually off.
+                awb_on = bool(updates.get("awb_enable", self.profile.get("awb_enable", True)))
+                if not awb_on:
+                    cam_controls["ColourGains"] = (float(gains[0]), float(gains[1]))
+                    applied.append(f"colour_gains=[{gains[0]}, {gains[1]}]")
 
         if "bitrate_mbps" in updates:
             new_bitrate_mbps = float(updates["bitrate_mbps"])
@@ -1052,6 +1165,24 @@ class WebRTCServer:
             if h264_codecs:
                 try:
                     transceiver.setCodecPreferences(h264_codecs)
+                    # aiortc applies codec preferences while processing the remote
+                    # offer, which has ALREADY happened by this point — so the call
+                    # above alone is a no-op and the offer's first codec (usually
+                    # VP8) stays negotiated. Since we stream pre-encoded H.264
+                    # packets, that mislabels them as VP8 and the client decodes
+                    # nothing (black video). Re-filter the negotiated list to pin
+                    # H.264, keeping its RTX entries for retransmission.
+                    negotiated = transceiver._codecs
+                    kept = [c for c in negotiated if c.mimeType.lower() == "video/h264"]
+                    kept_pts = {c.payloadType for c in kept}
+                    kept += [
+                        c for c in negotiated
+                        if c.mimeType.lower() == "video/rtx" and c.parameters.get("apt") in kept_pts
+                    ]
+                    if kept:
+                        transceiver._codecs = kept
+                    else:
+                        print(f"[WARN] Client offered no H.264 for {label}; keeping offered codecs", flush=True)
                 except Exception as exc:  # noqa: BLE001
                     print(f"[WARN] Failed to set codec preferences for {label}: {exc}", file=sys.stderr)
             sender = transceiver.sender
@@ -1098,13 +1229,35 @@ class WebRTCServer:
                 await pc.close()
                 self.pcs.discard(pc)
 
+        pc_tag = f"{id(pc) & 0xffff:04x}@{request.remote}"
+        print(f"[ICEDBG] pc={pc_tag} new offer ({len(self.pcs)} pcs total)", flush=True)
+
         @pc.on("connectionstatechange")
         async def on_connectionstatechange() -> None:
+            print(f"[ICEDBG] pc={pc_tag} connectionState -> {pc.connectionState}", flush=True)
             await _handle_state_change()
+
+        @pc.on("iceconnectionstatechange")
+        async def on_iceconnectionstatechange() -> None:
+            print(f"[ICEDBG] pc={pc_tag} iceConnectionState -> {pc.iceConnectionState}", flush=True)
+
+        @pc.on("icegatheringstatechange")
+        async def on_icegatheringstatechange() -> None:
+            print(f"[ICEDBG] iceGatheringState -> {pc.iceGatheringState}", flush=True)
+
+        # TEMP DIAGNOSTIC: dump the remote (client) ICE candidates so we can see
+        # whether the Quest is sending mDNS (.local) candidates aiortc can't resolve.
+        for line in params["sdp"].splitlines():
+            if line.startswith("a=candidate") or line.startswith("candidate"):
+                print(f"[ICEDBG] remote candidate: {line.strip()}", flush=True)
 
         try:
             answer = await pc.createAnswer()
             await pc.setLocalDescription(answer)
+            # TEMP DIAGNOSTIC: dump our own (Pi) candidates that we offered back.
+            for line in pc.localDescription.sdp.splitlines():
+                if line.startswith("a=candidate"):
+                    print(f"[ICEDBG] local candidate:  {line.strip()}", flush=True)
         except Exception as exc:  # noqa: BLE001
             await pc.close()
             self.pcs.discard(pc)
@@ -1128,10 +1281,18 @@ class WebRTCServer:
                         stats = await sender.getStats()
                         bytes_sent = 0
                         packets_sent = 0
+                        rr_lost = rr_frac = rr_rtt = rr_jitter = None
                         for report in stats.values():
                             if report.type == "outbound-rtp":
                                 bytes_sent = getattr(report, "bytesSent", 0)
                                 packets_sent = getattr(report, "packetsSent", 0)
+                            elif report.type == "remote-inbound-rtp":
+                                # The client's own RTCP receiver report: ground truth
+                                # for whether the network path is dropping packets.
+                                rr_lost = getattr(report, "packetsLost", None)
+                                rr_frac = getattr(report, "fractionLost", None)
+                                rr_rtt = getattr(report, "roundTripTime", None)
+                                rr_jitter = getattr(report, "jitter", None)
                         # aiortc outbound stats carry no frame counts; use the
                         # encoder-output counters, which are authoritative.
                         ts_log = camera.output.ts_log
@@ -1146,10 +1307,13 @@ class WebRTCServer:
                             "droppedFrames": camera.broadcaster._drop_count,
                         }
                         if tick % 5 == 0:
+                            rtt_ms = f"{rr_rtt * 1000:.0f}" if rr_rtt is not None else "?"
+                            frac_pct = f"{rr_frac * 100:.1f}" if rr_frac is not None else "?"
                             print(
-                                f"[STATS] eye={label} mid={transceiver.mid} bytes={bytes_sent} "
+                                f"[STATS] pc={pc_tag} eye={label} mid={transceiver.mid} bytes={bytes_sent} "
                                 f"frames={ts_log.frames} keyFrames={ts_log.keyframes} "
-                                f"drops={camera.broadcaster._drop_count}",
+                                f"drops={camera.broadcaster._drop_count} "
+                                f"clientLost={rr_lost} lossPct={frac_pct} rtt={rtt_ms}ms jitter={rr_jitter}",
                                 flush=True,
                             )
                         if stats_channel is not None and stats_channel.readyState == "open":
@@ -1191,6 +1355,15 @@ class WebRTCServer:
             text=json.dumps({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}),
         )
 
+    async def beacon(self, request: web.Request) -> web.Response:
+        """TEMP DIAGNOSTIC: client-side decode stats, echoed into the server log."""
+        try:
+            data = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response({"ok": False})
+        print(f"[CLIENT] {request.remote} {json.dumps(data, separators=(',', ':'))[:500]}", flush=True)
+        return web.json_response({"ok": True})
+
     async def report(self, request: web.Request) -> web.Response:
         if request.content_length and request.content_length > 5_000_000:
             return web.Response(status=413, text="Report too large.")
@@ -1206,6 +1379,28 @@ class WebRTCServer:
         coros = [pc.close() for pc in list(self.pcs)]
         await asyncio.gather(*coros, return_exceptions=True)
         self.pcs.clear()
+
+    async def restart(self, _request: web.Request) -> web.Response:
+        """POST /api/restart -- re-exec the server so restart-only settings take effect.
+
+        The web client auto-reconnects with backoff, so it rides through the
+        ~10s the cameras take to come back up.
+        """
+        print("[INFO] Restart requested via /api/restart; re-executing...", flush=True)
+
+        async def _do_restart() -> None:
+            await asyncio.sleep(0.5)  # let the HTTP response flush first
+            await self.cleanup()
+            try:
+                self.capture.shutdown()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[WARN] capture shutdown during restart: {exc}", file=sys.stderr, flush=True)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+
+        asyncio.create_task(_do_restart())
+        return web.json_response({"ok": True, "message": "Server restarting; stream will reconnect."})
 
     async def serve_ca_certificate(self, _request: web.Request) -> web.StreamResponse:
         if not self.ca_cert or not self.ca_cert.exists():
@@ -1293,7 +1488,9 @@ class WebRTCServer:
             for key, value in cam_updates.items():
                 if key in RUNTIME_SETTINGS:
                     runtime_changes[key] = value
-                elif key in RESTART_SETTINGS:
+                elif key in RESTART_SETTINGS and profile.get(key) != value:
+                    # only a genuine change forces a restart; the client always
+                    # POSTs every field, changed or not
                     restart_changes[key] = value
 
             if runtime_changes and cam:
@@ -1301,7 +1498,7 @@ class WebRTCServer:
                 runtime_applied.extend([f"{cam_name}.{a}" for a in applied])
 
             for key, value in cam_updates.items():
-                if key in RUNTIME_SETTINGS or key in RESTART_SETTINGS:
+                if key in RUNTIME_SETTINGS or key in RESTART_SETTINGS or key in CLIENT_SETTINGS:
                     profile[key] = value
 
             if restart_changes:
@@ -1325,7 +1522,7 @@ class WebRTCServer:
             "restart_needed": restart_needed,
         }
         if restart_needed:
-            result["message"] = "Settings saved. Server restart required for resolution/rotation/crop changes."
+            result["message"] = "Settings saved. Server restart required for resolution/crop changes."
         else:
             result["message"] = "Settings applied."
 
@@ -1402,6 +1599,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=False,
         help="Skip the camera pre-flight health checks on startup",
     )
+    parser.add_argument(
+        "--no-tls",
+        action="store_true",
+        default=False,
+        help="Serve plain HTTP (skip cert auto-discovery). Use with the Quest browser's "
+             "'insecure origins treated as secure' flag for the Pi origin.",
+    )
     return parser
 
 
@@ -1421,6 +1625,12 @@ def main() -> None:
             sys.exit(1)
 
     auto_cert, auto_key, auto_ca = discover_tls_assets()
+
+    if args.no_tls:
+        if cert_path or key_path:
+            print("[ERROR] --no-tls cannot be combined with --cert/--key", file=sys.stderr)
+            sys.exit(1)
+        auto_cert = auto_key = auto_ca = None  # force plain HTTP; skip /ca.crt too
 
     if cert_path and not key_path:
         print("[ERROR] --cert provided without --key", file=sys.stderr)
@@ -1494,6 +1704,8 @@ async def run_streamer(
     app.router.add_post("/offer", server.offer)
     app.router.add_get("/api/settings", server.get_settings)
     app.router.add_post("/api/settings", server.post_settings)
+    app.router.add_post("/api/restart", server.restart)
+    app.router.add_post("/beacon", server.beacon)
     app.router.add_post("/report", server.report)
     app.router.add_static("/static/", STATIC_DIR, show_index=True)
     if ca_cert_path:

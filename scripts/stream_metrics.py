@@ -123,9 +123,64 @@ class PtsClockCheck:
             deltas_ms = [d / 1000 for d in self._deltas]
             self._deltas = None
         median = statistics.median(deltas_ms)
+        # A correct reconstruction lands capture_us a little BEFORE encode-output, so the
+        # delta is a small positive value (readout + encode). A negative or huge (seconds)
+        # delta means the domain is wrong. A positive-but-large delta (>100ms) means the
+        # domain is right but the encode pipeline is deep — a latency problem, not a metric
+        # bug — so we distinguish the two rather than lumping both under "SUSPECT".
+        if median < 0 or median > 5000:
+            verdict = "SUSPECT — pts not in boottime domain, e2e metric invalid"
+        elif median > 100:
+            verdict = f"HIGH — domain OK but capture->encode latency is {median:.0f}ms (see [PILAT])"
+        else:
+            verdict = "OK"
         print(
             f"[CLOCK] {self._name}: boottime - pts over {self._sample_count} frames: "
             f"median={median:.1f}ms min={min(deltas_ms):.1f}ms max={max(deltas_ms):.1f}ms "
-            f"{'OK' if 0 <= median <= 100 else 'SUSPECT — pts not in boottime domain, e2e metric invalid'}",
+            f"{verdict}",
+            flush=True,
+        )
+
+
+class PiLatencyMonitor:
+    """Rolling steady-state report of capture -> encode-done latency for one eye.
+
+    The one-shot ``PtsClockCheck`` samples only the first frames, which are
+    contaminated by camera/encoder warm-up. This keeps sampling and prints a
+    median/p95 over a sliding window every ``report_period_s`` seconds, after a
+    warm-up grace period, so we can tell transient startup latency apart from a
+    genuinely deep encode pipeline.
+    """
+
+    def __init__(self, name: str, warmup_frames: int = 120, window: int = 240, report_period_s: float = 3.0):
+        self._name = name
+        self._warmup_frames = warmup_frames
+        self._samples: deque[float] = deque(maxlen=window)
+        self._report_period_us = int(report_period_s * 1_000_000)
+        self._count = 0
+        self._last_report_us = 0
+        self._lock = Lock()
+
+    def sample(self, capture_us: int, enc_done_us: int) -> None:
+        with self._lock:
+            self._count += 1
+            if self._count <= self._warmup_frames:
+                return
+            self._samples.append((enc_done_us - capture_us) / 1000.0)
+            if self._last_report_us == 0:
+                self._last_report_us = enc_done_us
+                return
+            if enc_done_us - self._last_report_us < self._report_period_us:
+                return
+            self._last_report_us = enc_done_us
+            ordered = sorted(self._samples)
+            snapshot = ordered
+        if not snapshot:
+            return
+        median = snapshot[len(snapshot) // 2]
+        p95 = snapshot[min(len(snapshot) - 1, int(len(snapshot) * 0.95))]
+        print(
+            f"[PILAT] {self._name}: capture->encode-done over {len(snapshot)} frames: "
+            f"median={median:.1f}ms p95={p95:.1f}ms",
             flush=True,
         )

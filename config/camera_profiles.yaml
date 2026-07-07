@@ -4,39 +4,53 @@ profiles:
     resolution:
     - 2304
     - 1296
-    rotation: 270
-    hflip: true
-    vflip: true
+    rotation: 0
+    hflip: false
+    vflip: false
     crop:
-    - 1000
-    - 1000
-    offset_x: -48
+    - 2304
+    - 2304
+    offset_x: -251
     offset_y: 0
     awb_enable: true
     awb_mode: auto
     colour_gains:
-    - 1.0
-    - 1.0
-    bitrate_mbps: 40.0
+    - 1
+    - 1
+    bitrate_mbps: 16.0
+    h264_profile: baseline
+    gop_frames: 60
+    repeat_headers: true
+    encode_size:
+    - 1024
+    - 1024
+    encoder_threads: 4
   cam1:
     description: Right camera (CSI port 1)
     resolution:
     - 2304
     - 1296
-    rotation: 90
+    rotation: 0
     hflip: true
     vflip: false
     crop:
-    - 1000
-    - 1000
+    - 2304
+    - 2304
     offset_x: 0
     offset_y: 0
     awb_enable: true
     awb_mode: auto
     colour_gains:
-    - 1.0
-    - 1.0
-    bitrate_mbps: 40.0
+    - 7.3
+    - 1
+    bitrate_mbps: 16.0
+    h264_profile: baseline
+    gop_frames: 60
+    repeat_headers: true
+    encode_size:
+    - 1024
+    - 1024
+    encoder_threads: 4
 calibration:
   chessboard:
     columns: 9
